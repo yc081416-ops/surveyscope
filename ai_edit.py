@@ -469,6 +469,11 @@ def call_openai_compatible_llm(prompt: str, api_config: dict) -> str:
         ],
         "temperature": 0.0,
     }
+    # DeepSeek 当前模型默认开启思考模式（默认 effort=high）：解析一条改图 JSON 不需要思考，
+    # 开着只会让响应时长剧烈波动（实测 2 秒到 60 秒以上不等，前端表现为「没反应」甚至超时）。
+    # 仅对 DeepSeek 接口关闭思考，其他兼容接口不发送该字段。
+    if "deepseek" in base_url.lower():
+        payload["thinking"] = {"type": "disabled"}
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -570,6 +575,15 @@ def _local_rule_fallback(user_instruction: str) -> str:
     m_top = re.search(r"前\s*(\d+)\s*项", txt)
     if m_top:
         return json.dumps({"action": "top_n", "value": int(m_top.group(1))}, ensure_ascii=False)
+    # 整体配色/色板切换（放在最后：更具体的单类改色规则已在上方优先处理）
+    if "配色" in txt or "色板" in txt:
+        if "绿" in txt:
+            return json.dumps({"action": "color_scheme", "value": "松绿序渐"}, ensure_ascii=False)
+        if "发散" in txt:
+            return json.dumps({"action": "color_scheme", "value": "BrBG发散"}, ensure_ascii=False)
+        if "默认" in txt:
+            return json.dumps({"action": "color_scheme", "value": "主题默认"}, ensure_ascii=False)
+        return json.dumps({"action": "color_scheme", "value": "Tol Muted"}, ensure_ascii=False)
     return json.dumps({"reject": True, "reason": "未能识别为白名单内的样式指令，或尚未填写大模型 API Key。"}, ensure_ascii=False)
 
 

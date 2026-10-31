@@ -602,13 +602,14 @@ def render_interactive_chart_card(
             with ac1:
                 if st.button("执行样式指令", type="primary", key=f"btn_ai_{slot_key}", use_container_width=True):
                     if user_prompt.strip():
-                        res_ai = apply_ai_instruction(
-                            user_instruction=user_prompt.strip(),
-                            current_settings=curr_settings,
-                            api_config=st.session_state["ai_config"],
-                            chart_type=chart_id,
-                            categories=src_cats,
-                        )
+                        with st.spinner("正在解析样式指令，请稍候…"):
+                            res_ai = apply_ai_instruction(
+                                user_instruction=user_prompt.strip(),
+                                current_settings=curr_settings,
+                                api_config=st.session_state["ai_config"],
+                                chart_type=chart_id,
+                                categories=src_cats,
+                            )
                         if res_ai["ok"]:
                             push_settings_history(st.session_state["chart_history"], slot_key, curr_settings)
                             st.session_state["chart_settings"][slot_key] = res_ai["new_settings"]
