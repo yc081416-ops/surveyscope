@@ -54,7 +54,7 @@ def _docx_rgb(hex_str: str) -> RGBColor:
 def _df_to_markdown_table(df: pd.DataFrame, max_rows: int = 15) -> str:
     """将 DataFrame 格式化为标准 Markdown 表格字符串，写入 PPT 备注栏 (Notes)。"""
     if df is None or df.empty:
-        return "| 指标 | 数值 |\n| --- | --- |\n| 样本量 | 282 |"
+        return "| 指标 | 数值 |\n| --- | --- |\n| 暂无明细 | — |"
     sub = df.head(max_rows)
     cols = [str(c) for c in sub.columns]
     header = "| " + " | ".join(cols) + " |"
@@ -409,6 +409,200 @@ def _write_slide_notes_markdown(slide, title: str, conclusion: str, df: pd.DataF
     )
 
 
+def get_available_report_chapters(df: pd.DataFrame, qtypes_override: dict = None) -> list:
+    """
+    根据当前上传数据集的真实列结构，动态识别可纳入 PPT/Word 报告的章节清单（供导出前勾选预览）。
+    绝不为不满足数据条件的模块伪造占位页。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    caps = su.detect_dataset_capabilities(df, qtypes_override)
+    sm = caps["special_models"]
+
+    chapters = [
+        {
+            "key": "ch1_overview",
+            "title": "样本概况与数据质控",
+            "enabled": True,
+            "summary": f"原始样本与质控清洗分布、统计显著性与效应量方法口径（分析题共 {len(caps['analysis_cols'])} 道）",
+        }
+    ]
+
+    if caps["modules"]["single_question"]:
+        parts = []
+        if caps["single_cols"]:
+            parts.append(f"单选 {len(caps['single_cols'])} 题")
+        if caps["multi_cols"]:
+            parts.append(f"多选 {len(caps['multi_cols'])} 题")
+        if caps["scale_cols"]:
+            parts.append(f"量表 {len(caps['scale_cols'])} 题")
+        if caps["numeric_cols"]:
+            parts.append(f"数值 {len(caps['numeric_cols'])} 题")
+        if caps["nps_cols"]:
+            parts.append(f"NPS {len(caps['nps_cols'])} 题")
+        if sm["map"]["enabled"]:
+            parts.append("省份区域分布地图")
+        chapters.append({
+            "key": "ch2_single",
+            "title": "核心题目分布与单题洞察",
+            "enabled": True,
+            "summary": "涵盖 " + "、".join(parts) + " 的频数/均值分布与可视化图表",
+        })
+
+    if caps["modules"]["crosstab"]:
+        cross_parts = []
+        if caps["cross_cat_cat"]:
+            cross_parts.append("卡方独立性检验与标准化残差")
+        if caps["cross_cat_num"]:
+            cross_parts.append("分组均值检验与雨云全息分布")
+        if sm["sankey"]["enabled"]:
+            cross_parts.append("流转留存桑基图")
+        chapters.append({
+            "key": "ch3_cross",
+            "title": "交叉分析与群体差异检验",
+            "enabled": True,
+            "summary": "涵盖 " + "、".join(cross_parts),
+        })
+
+    if caps["modules"]["scale_modeling"]:
+        mod_parts = ["信度与因子/相关结构"]
+        if sm["sem"]["enabled"]:
+            mod_parts.append("SEM 路径模型")
+        if len(caps["scale_cols"]) + len(caps["numeric_cols"]) >= 2 and len(df) >= 25:
+            mod_parts.append("多元回归与机器学习重要度评估")
+        chapters.append({
+            "key": "ch4_scale",
+            "title": "量表信效度与驱动力建模",
+            "enabled": True,
+            "summary": "涵盖 " + "、".join(mod_parts),
+        })
+
+    spec_active = []
+    for k_id, label in [
+        ("funnel", "转化漏斗"),
+        ("conjoint", "联合分析"),
+        ("ipa", "IPA 四象限"),
+        ("psm", "PSM 价格敏感度"),
+        ("kano", "KANO 需求分层"),
+        ("clustering", "消费者分群画像"),
+        ("ca", "对应分析双标图"),
+    ]:
+        if sm[k_id]["enabled"]:
+            spec_active.append(label)
+    if caps["modules"]["text_analysis"]:
+        spec_active.append("开放题词云与高频词统计")
+
+    if spec_active:
+        chapters.append({
+            "key": "ch5_special",
+            "title": "专项研究模型与文本洞察",
+            "enabled": True,
+            "summary": "按当前数据自动匹配启用：" + "、".join(spec_active),
+        })
+
+    chapters.append({
+        "key": "ch6_summary",
+        "title": "核心结论汇总与技术附录",
+        "enabled": True,
+        "summary": "基于实测检验结果提炼的核心发现矩阵、信效度/样本质量指标与研究局限声明",
+    })
+    return chapters
+
+
+def build_adaptive_word_sections(
+    valid_df: pd.DataFrame,
+    theme_name: str = DEFAULT_THEME_NAME,
+    is_demo: bool = False,
+    enabled_chapters: list = None,
+    qtypes_override: dict = None,
+    custom_sections: list = None,
+) -> list:
+    """根据数据集真实能力与勾选章节，自动组装 Word 报告图表与数据表章节（并合并用户手动钉选的图表）。"""
+    sections = []
+    if not isinstance(valid_df, pd.DataFrame) or valid_df.empty:
+        return list(custom_sections or [])
+
+    caps = su.detect_dataset_capabilities(valid_df, qtypes_override)
+    sm = caps["special_models"]
+    avail_keys = {c["key"] for c in get_available_report_chapters(valid_df, qtypes_override)}
+    active = set(enabled_chapters) & avail_keys if enabled_chapters is not None else avail_keys
+
+    def _append_bundle(sec_title: str, b: dict):
+        sections.append({
+            "title": sec_title,
+            "conclusion": b["conclusion"],
+            "table": b["source_df"],
+            "source_df": b["source_df"],
+            "png_bytes": b["png_bytes"],
+        })
+
+    if "ch2_single" in active:
+        for sc in caps["single_cols"][:3]:
+            b = cu.render_chart_by_id("01-棒棒糖图", valid_df, theme_name=theme_name, is_demo=is_demo, col=sc)
+            _append_bundle(f"单题分析：{sc}", b)
+        for mc in caps["multi_cols"][:1]:
+            b = cu.render_chart_by_id("06-多选题条形图", valid_df, theme_name=theme_name, is_demo=is_demo, col=mc)
+            _append_bundle(f"多选题分析：{mc}", b)
+        if len(caps["scale_cols"]) >= 2:
+            b = cu.render_chart_by_id("11-发散堆叠条形图", valid_df, theme_name=theme_name, is_demo=is_demo, cols=caps["scale_cols"][:8])
+            _append_bundle("量表题态度发散分布", b)
+        for nc in caps["numeric_cols"][:1]:
+            b = cu.render_chart_by_id("07-直方图与核密度", valid_df, theme_name=theme_name, is_demo=is_demo, col=nc)
+            _append_bundle(f"数值题分布：{nc}", b)
+        for npc in caps["nps_cols"][:1]:
+            b = cu.render_chart_by_id("13-NPS仪表盘", valid_df, theme_name=theme_name, is_demo=is_demo, col=npc)
+            _append_bundle(f"净推荐值诊断：{npc}", b)
+        if sm["map"]["enabled"]:
+            b = cu.render_chart_by_id("44-区域分布地图", valid_df, theme_name=theme_name, is_demo=is_demo, col=sm["map"]["col"])
+            _append_bundle(f"区域分布地图：{sm['map']['col']}", b)
+
+    if "ch3_cross" in active:
+        if caps["cross_cat_cat"]:
+            r_c, c_c = caps["single_cols"][0], caps["single_cols"][1]
+            b = cu.render_chart_by_id("15-100%堆叠条形图", valid_df, theme_name=theme_name, is_demo=is_demo, row_col=r_c, col_col=c_c)
+            _append_bundle(f"交叉列联分析：{r_c} × {c_c}", b)
+        if caps["cross_cat_num"]:
+            g_c = caps["single_cols"][0]
+            n_c = (caps["numeric_cols"] + caps["scale_cols"] + caps["nps_cols"])[0]
+            b = cu.render_chart_by_id("09-雨云图", valid_df, theme_name=theme_name, is_demo=is_demo, group_col=g_c, num_col=n_c)
+            _append_bundle(f"分组均值对比：{g_c} × {n_c}", b)
+
+    if "ch4_scale" in active and caps["modules"]["scale_modeling"]:
+        b = cu.render_chart_by_id("26-相关性热力图", valid_df, theme_name=theme_name, is_demo=is_demo)
+        _append_bundle("多变量相关性矩阵", b)
+        if sm["sem"]["enabled"]:
+            b = cu.render_chart_by_id("34-结构方程路径图", valid_df, theme_name=theme_name, is_demo=is_demo)
+            _append_bundle("结构方程路径模型 (SEM)", b)
+
+    if "ch5_special" in active:
+        if sm["ca"]["enabled"]:
+            c1, c2 = sm["ca"]["cols"][0], sm["ca"]["cols"][1]
+            b = cu.render_chart_by_id("31-对应分析双标图", valid_df, theme_name=theme_name, is_demo=is_demo, row_col=c1, col_col=c2)
+            _append_bundle(f"对应分析：{c1} × {c2}", b)
+        if sm["ipa"]["enabled"]:
+            b = cu.render_chart_by_id("32-IPA四象限图", valid_df, theme_name=theme_name, is_demo=is_demo)
+            _append_bundle("IPA 重要性-满意度四象限", b)
+        if sm["psm"]["enabled"]:
+            b = cu.render_chart_by_id("33-PSM价格敏感度曲线", valid_df, theme_name=theme_name, is_demo=is_demo)
+            _append_bundle("PSM 价格敏感度测试", b)
+        if sm["kano"]["enabled"]:
+            b = cu.render_chart_by_id("35-KANO模型图", valid_df, theme_name=theme_name, is_demo=is_demo)
+            _append_bundle("KANO 需求分层模型", b)
+        if sm["clustering"]["enabled"]:
+            b = cu.render_chart_by_id("45-消费者画像卡片", valid_df, theme_name=theme_name, is_demo=is_demo)
+            _append_bundle("消费者聚类画像卡片", b)
+        if caps["modules"]["text_analysis"]:
+            b = cu.render_chart_by_id("46-词云与词频组合图", valid_df, theme_name=theme_name, is_demo=is_demo, col=caps["text_cols"][0])
+            _append_bundle(f"开放题词云分析：{caps['text_cols'][0]}", b)
+
+    if custom_sections:
+        existing_titles = {s.get("title") for s in sections}
+        for cs in custom_sections:
+            if cs.get("title") not in existing_titles:
+                sections.append(cs)
+    return sections
+
+
 def build_ppt_report(
     overview_res: dict,
     qc_res: dict,
@@ -417,25 +611,35 @@ def build_ppt_report(
     is_weighted: bool = False,
     theme_name: str = DEFAULT_THEME_NAME,
     df: pd.DataFrame = None,
+    export_options: dict = None,
 ) -> bytes:
     """
-    构建出版级 16:9 PPT 分析报告 (.pptx)：
-    - 固定包含 7 类幻灯片，总页数 >= 22 页；
-    - 原生可编辑 PowerPoint 图表 (ppt/charts/chart*.xml) >= 9 个；
-    - 矢量可编辑 SVG 图表 (ppt/media/*.svg) >= 12 个；
-    - 含 Markdown 源数据表的备注页 >= 18 页。
+    构建出版级 16:9 自适应 PPT 分析报告 (.pptx)：
+    - 严禁调用任何虚拟演示数据兜底；严格按上传数据集实际具备的列与题型动态生成对应篇章；
+    - 全功能数据集自动生成完整 7 类版式（含 >=9 个原生 XML 图表、>=15 个 svgBlip 矢量图表及备注页 Markdown 源数据表）；
+    - 纯单选/精简问卷仅生成有真实数据支撑的单选、交叉及可用专项模型页，绝不塞入假数据页。
     """
     t = resolve_effective_theme(theme_name)
-    valid_df = df if isinstance(df, pd.DataFrame) else qc_res.get("valid_df")
+    valid_df = df if isinstance(df, pd.DataFrame) else (qc_res or {}).get("valid_df")
     if not isinstance(valid_df, pd.DataFrame) or valid_df.empty:
-        raw_demo = su.generate_demo_coffee_data(seed=42, n=300)
-        qc_fallback = su.run_quality_control(
-            raw_demo,
-            straight_cols=["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引", "品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_品质不稳定_反向"],
-            duration_col="答题时长（秒）",
-            min_seconds=30,
-        )
-        valid_df = qc_fallback["valid_df"]
+        raise ValueError("导出 PPT 报告失败：未检测到有效的问卷数据集，请先上传问卷数据。")
+
+    export_options = export_options or {}
+    qtypes_override = export_options.get("qtypes_override")
+    caps = su.detect_dataset_capabilities(valid_df, qtypes_override)
+    sm = caps["special_models"]
+
+    avail_chapters = get_available_report_chapters(valid_df, qtypes_override)
+    avail_keys = {c["key"] for c in avail_chapters}
+    req_chapters = export_options.get("enabled_chapters")
+    active_chapters = (set(req_chapters) & avail_keys) if req_chapters is not None else avail_keys
+    if not active_chapters:
+        active_chapters = avail_keys
+
+    is_coffee_bench = all(
+        c in valid_df.columns
+        for c in ["消费频次", "年龄段", "性别", "偏好品类", "NPS推荐度", "价格量表1_价格合理", "品质量表1_口感醇厚"]
+    )
 
     prs = Presentation()
     prs.slide_width = PptInches(13.333)
@@ -448,9 +652,10 @@ def build_ppt_report(
 
     svg_media_blobs = []
     page_counter = 1
+    findings_collector = []
 
     # ==========================================================================
-    # 第 1 类：封面页 (Slide 1 - 左 55% 主题深色块 + 右 45% KPI 与视觉锚点)
+    # 第 1 类：封面页 (Slide 1 - 左 55% 主题深色块 + 右 45% 实测 KPI 与视觉锚点)
     # ==========================================================================
     s_cover = prs.slides.add_slide(blank_layout)
     _set_slide_background(s_cover, t["bg_canvas"])
@@ -459,63 +664,124 @@ def build_ppt_report(
 
     cov_tc = auto_text_color(t["accent_primary"])
     _add_text(s_cover, 0.65, 1.15, 6.2, 0.45, "SURVEYSCOPE · 市场研究与问卷洞察报告", font_size=13, bold=True, color_hex=t["main_pale"])
-    _add_text(s_cover, 0.65, 1.78, 6.2, 0.75, "现磨咖啡消费行为与", font_size=30, bold=True, color_hex=cov_tc)
-    _add_text(s_cover, 0.65, 2.52, 6.2, 0.75, "品牌驱动力深度研究", font_size=30, bold=True, color_hex=cov_tc)
-    _add_text(s_cover, 0.65, 3.60, 6.2, 0.75, "全链路统计检验 · 多维感知建模 · 价格敏感度与联合分析专项", font_size=13.5, bold=False, color_hex=cov_tc)
 
-    # 左下角元数据胶囊
+    custom_title = str(export_options.get("report_title") or "").strip()
+    if custom_title:
+        clean_t = re.sub(r"\.(csv|xlsx|xls)$", "", custom_title, flags=re.IGNORECASE)
+        if len(clean_t) > 11:
+            mid = len(clean_t) // 2
+            line1, line2 = clean_t[:mid], clean_t[mid:]
+        else:
+            line1, line2 = clean_t, "统计分析与洞察报告"
+    elif is_coffee_bench:
+        line1, line2 = "现磨咖啡消费行为与", "品牌驱动力深度研究"
+    else:
+        line1, line2 = "问卷调查数据统计分析", "与核心洞察报告"
+
+    _add_text(s_cover, 0.65, 1.78, 6.2, 0.75, line1, font_size=28, bold=True, color_hex=cov_tc)
+    _add_text(s_cover, 0.65, 2.52, 6.2, 0.75, line2, font_size=28, bold=True, color_hex=cov_tc)
+
+    active_tags = ["数据质控清洗"]
+    if "ch2_single" in active_chapters:
+        active_tags.append("单题分布洞察")
+    if "ch3_cross" in active_chapters:
+        active_tags.append("交叉显著性检验")
+    if "ch4_scale" in active_chapters:
+        active_tags.append("量表与回归建模")
+    if "ch5_special" in active_chapters:
+        active_tags.append("专项模型诊断")
+    _add_text(s_cover, 0.65, 3.60, 6.2, 0.75, " · ".join(active_tags), font_size=13.5, bold=False, color_hex=cov_tc)
+
     _add_rect(s_cover, 0.65, 5.15, 6.20, 1.55, fill_hex=t["main_dark"], border_hex=t["main_light"], rounded=True)
     _add_text(s_cover, 0.85, 5.32, 5.85, 0.38, f"• 样本规模：原始 {qc_res['total_n']} 份 | 质控后有效 n = {qc_res['valid_n']} 份（有效率 {qc_res['valid_rate']:.1f}%）", font_size=10.5, bold=False, color_hex=cov_tc)
     _add_text(s_cover, 0.85, 5.74, 5.85, 0.38, f"• 视觉主题：{theme_name} | 统计显著性准则：双侧检验 α = 0.05 (95% CI)", font_size=10.5, bold=False, color_hex=cov_tc)
     _add_text(s_cover, 0.85, 6.16, 5.85, 0.38, f"• 数据口径：{demo_str}{weight_str}", font_size=10.5, bold=False, color_hex=cov_tc)
 
-    # 右侧 4 张核心指标卡片 + 迷你视觉锚点图
-    nps_res = su.analyze_nps_question(valid_df["NPS推荐度"])
-    psm_res = su.calc_van_westendorp(valid_df, "价格敏感_太便宜", "价格敏感_便宜", "价格敏感_贵", "价格敏感_太贵")
+    # 动态构建右侧 4 张实测 KPI 卡片（100% 源于当前数据集）
     kpis = [
         ("有效样本规模", f"n = {qc_res['valid_n']}", f"剔除异常 {qc_res['flagged_n']} 份 ({qc_res['valid_rate']:.1f}% 有效)"),
-        ("品牌净推荐值 (NPS)", f"{nps_res['nps']:+.1f}", f"推荐者 {nps_res['promoter_pct']:.1f}% vs 贬损者 {nps_res['detractor_pct']:.1f}%"),
-        ("最优定价点 (OPP)", f"{psm_res['opp'][0]:.2f} 元", f"可接受价格带 [{psm_res['pmc'][0]:.1f}, {psm_res['pme'][0]:.1f}] 元"),
-        ("长三角核心样本占比", "76.3%", "皖苏沪浙四省市消费频次领跑"),
     ]
-    for idx, (k_lbl, k_val, k_sub) in enumerate(kpis):
+    if caps["nps_cols"]:
+        nps_cov_res = su.analyze_nps_question(valid_df[caps["nps_cols"][0]])
+        kpis.append(("净推荐值 (NPS)", f"{nps_cov_res['nps']:+.1f}", f"推荐者 {nps_cov_res['promoter_pct']:.1f}% vs 贬损者 {nps_cov_res['detractor_pct']:.1f}%"))
+    else:
+        kpis.append(("分析题目总数", f"{len(caps['analysis_cols'])} 题", f"单选 {len(caps['single_cols'])} · 多选 {len(caps['multi_cols'])} · 量表 {len(caps['scale_cols'])}"))
+
+    if sm["psm"]["enabled"]:
+        pc = sm["psm"]["cols"]
+        psm_cov_res = su.calc_van_westendorp(valid_df, pc["too_cheap"], pc["cheap"], pc["expensive"], pc["too_expensive"])
+        kpis.append(("最优定价点 (OPP)", f"{psm_cov_res['opp'][0]:.2f} 元", f"可接受价格带 [{psm_cov_res['pmc'][0]:.1f}, {psm_cov_res['pme'][0]:.1f}] 元"))
+    elif caps["single_cols"]:
+        c0 = caps["single_cols"][0]
+        r0 = su.analyze_categorical_question(valid_df[c0])["table"].iloc[0]
+        kpis.append((str(c0)[:10], f"{r0['占比(%)']:.1f}%", f"首位选项：{str(r0['选项'])[:12]} (n={r0['频数']})"))
+    elif caps["numeric_cols"]:
+        nc0 = caps["numeric_cols"][0]
+        nr0 = su.analyze_numeric_question(valid_df[nc0])
+        kpis.append((str(nc0)[:10], f"均值 {nr0['mean']:.1f}", f"中位数 {nr0['median']:.1f} (IQR={nr0['iqr']:.1f})"))
+
+    if sm["map"]["enabled"]:
+        pv_cov = su.calc_province_distribution(valid_df, col=sm["map"]["col"])
+        top_pv = pv_cov["table"].iloc[0]
+        kpis.append(("首位样本省份", f"{top_pv['省份']} {top_pv['占比(%)']:.1f}%", f"共覆盖全国 {len(pv_cov['table'])} 个省级行政区"))
+    elif len(caps["single_cols"]) >= 2:
+        c1 = caps["single_cols"][1]
+        r1 = su.analyze_categorical_question(valid_df[c1])["table"].iloc[0]
+        kpis.append((str(c1)[:10], f"{r1['占比(%)']:.1f}%", f"首位选项：{str(r1['选项'])[:12]} (n={r1['频数']})"))
+    else:
+        miss_avg = float(overview_res["missing_df"]["缺失率(%)"].mean()) if not overview_res["missing_df"].empty else 0.0
+        kpis.append(("数据完整度", f"{100.0 - miss_avg:.1f}%", f"题均缺失率 {miss_avg:.1f}%"))
+
+    for idx, (k_lbl, k_val, k_sub) in enumerate(kpis[:4]):
         col_i = idx % 2
         row_i = idx // 2
         kx = 7.75 + col_i * 2.62
         ky = 0.75 + row_i * 1.65
         _add_rect(s_cover, kx, ky, 2.45, 1.45, fill_hex=t["bg_card"], border_hex=t["border_line"], rounded=True)
         _add_text(s_cover, kx + 0.15, ky + 0.12, 2.15, 0.30, k_lbl, font_size=10.5, bold=True, color_hex=t["text_secondary"])
-        _add_text(s_cover, kx + 0.15, ky + 0.45, 2.15, 0.50, k_val, font_size=20, bold=True, color_hex=t["accent_primary"])
+        _add_text(s_cover, kx + 0.15, ky + 0.45, 2.15, 0.50, k_val, font_size=19, bold=True, color_hex=t["accent_primary"])
         _add_text(s_cover, kx + 0.15, ky + 1.02, 2.15, 0.32, k_sub, font_size=8.8, bold=False, color_hex=t["text_muted"])
 
-    # 封面右下角嵌入 NPS 仪表盘视觉锚点（同步绑定 svgBlip 真矢量扩展）
-    b_nps_cov = cu.chart_13_nps_gauge(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    s_cover.shapes.add_picture(io.BytesIO(b_nps_cov["png_bytes"]), PptInches(7.75), PptInches(4.15), width=PptInches(5.05))
-    svg_media_blobs.append((len(prs.slides), 0, "13_cover", b_nps_cov["svg_bytes"]))
+    # 封面右下角嵌入自适应视觉锚点图（同步绑定 svgBlip 真矢量扩展）
+    if caps["nps_cols"]:
+        b_cov_fig = cu.render_chart_by_id("13-NPS仪表盘", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=caps["nps_cols"][0])
+    elif caps["single_cols"]:
+        b_cov_fig = cu.render_chart_by_id("01-棒棒糖图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=caps["single_cols"][0])
+    elif caps["scale_cols"]:
+        b_cov_fig = cu.render_chart_by_id("12-均值置信区间图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, cols=caps["scale_cols"][:6])
+    else:
+        b_cov_fig = cu.render_chart_by_id("07-直方图与核密度", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=caps["numeric_cols"][0])
+
+    s_cover.shapes.add_picture(io.BytesIO(b_cov_fig["png_bytes"]), PptInches(7.75), PptInches(4.15), width=PptInches(5.05))
+    svg_media_blobs.append((len(prs.slides), 0, "cover_anchor", b_cov_fig["svg_bytes"]))
     page_counter += 1
 
     # ==========================================================================
-    # 第 2 类：目录页 (Slide 2 - 5 大核心章节导航与核心结论预览)
+    # 第 2 类：目录页 (Slide 2 - 动态展示本次报告实际启用的章节)
     # ==========================================================================
     s_toc = prs.slides.add_slide(blank_layout)
     _set_slide_background(s_toc, t["bg_canvas"])
-    _add_slide_header_and_footer(s_toc, t, "REPORT CONTENTS · 报告篇章导航", "全报告五大核心篇章与关键发现索引", base_footnote, page_counter)
+    toc_chapters = [c for c in avail_chapters if c["key"] in active_chapters and c["key"] != "ch6_summary"]
+    if "ch6_summary" in active_chapters:
+        toc_chapters.append(next(c for c in avail_chapters if c["key"] == "ch6_summary"))
+    toc_chapters = toc_chapters[:6]
 
-    chapters = [
-        ("01", "样本概况与数据质控", "原始样本 300 份，剔除直线/过快作答 18 份，有效样本 n=282（有效率 94.0%）", "P.03"),
-        ("02", "消费者画像与单题洞察", "25-35 岁青年白领占主导，每周饮用 1-5 杯占比超六成，生椰拿铁普及率第一", "P.05"),
-        ("03", "交叉分析与群体差异", "年龄与消费频次关联稳健，主常购买品牌留存率瑞幸居首，男女消费均值均衡", "P.13"),
-        ("04", "量表信效度与驱动力建模", "量表 α>0.78、KMO>0.75；价格感知(β=+0.35)与品质感知(β=+0.36)双轮驱动 NPS", "P.17"),
-        ("05", "市调专项与策略建议", "联合分析价格权重达 38.2%，PSM 最优定价 14.85 元，IPA 指明性价比为首要改进项", "P.21"),
-    ]
-    for i, (c_no, c_title, c_desc, c_pg) in enumerate(chapters):
-        cy = 1.32 + i * 1.05
-        _add_rect(s_toc, 0.65, cy, 12.0, 0.88, fill_hex=t["bg_card"], border_hex=t["border_line"], rounded=True)
-        _add_rect(s_toc, 0.65, cy, 0.95, 0.88, fill_hex=t["accent_primary"], rounded=True)
-        _add_text(s_toc, 0.65, cy + 0.18, 0.95, 0.50, c_no, font_size=20, bold=True, color_hex=auto_text_color(t["accent_primary"]), align=PP_ALIGN.CENTER)
-        _add_text(s_toc, 1.80, cy + 0.10, 8.8, 0.36, c_title, font_size=15, bold=True, color_hex=t["text_primary"])
-        _add_text(s_toc, 1.80, cy + 0.46, 8.8, 0.34, c_desc, font_size=11, bold=False, color_hex=t["text_secondary"])
-        _add_text(s_toc, 11.2, cy + 0.24, 1.2, 0.40, c_pg, font_size=14, bold=True, color_hex=t["accent_secondary"], align=PP_ALIGN.RIGHT)
+    _add_slide_header_and_footer(
+        s_toc, t, "REPORT CONTENTS · 报告篇章导航",
+        f"基于当前数据集自动生成 {len(toc_chapters)} 大核心分析篇章",
+        base_footnote, page_counter,
+    )
+    row_step = min(1.02, 5.25 / max(len(toc_chapters), 1))
+    box_h = min(0.86, row_step - 0.12)
+    for i, ch_item in enumerate(toc_chapters):
+        cy = 1.30 + i * row_step
+        c_no = f"{i+1:02d}"
+        _add_rect(s_toc, 0.65, cy, 12.0, box_h, fill_hex=t["bg_card"], border_hex=t["border_line"], rounded=True)
+        _add_rect(s_toc, 0.65, cy, 0.95, box_h, fill_hex=t["accent_primary"], rounded=True)
+        _add_text(s_toc, 0.65, cy + (box_h - 0.46) / 2, 0.95, 0.46, c_no, font_size=19, bold=True, color_hex=auto_text_color(t["accent_primary"]), align=PP_ALIGN.CENTER)
+        _add_text(s_toc, 1.80, cy + 0.08, 9.6, 0.34, ch_item["title"], font_size=14.5, bold=True, color_hex=t["text_primary"])
+        _add_text(s_toc, 1.80, cy + 0.43, 9.6, 0.32, ch_item["summary"], font_size=10.5, bold=False, color_hex=t["text_secondary"])
+        _add_text(s_toc, 11.4, cy + (box_h - 0.38) / 2, 1.0, 0.38, f"CH.{c_no}", font_size=12.5, bold=True, color_hex=t["accent_secondary"], align=PP_ALIGN.RIGHT)
     page_counter += 1
 
     # 辅助函数：生成第 3 类「章节过渡页」
@@ -529,74 +795,12 @@ def build_ppt_report(
         _add_text(s_div, 0.6, 3.6, 3.0, 1.0, ch_sub, font_size=13, bold=False, color_hex=t["main_pale"])
         _add_text(s_div, 4.75, 1.85, 7.8, 0.85, ch_title, font_size=28, bold=True, color_hex=t["text_primary"])
         _add_rect(s_div, 4.75, 2.75, 7.8, 0.04, fill_hex=t["accent_secondary"])
-        for b_i, b_txt in enumerate(bullets):
+        for b_i, b_txt in enumerate(bullets[:3]):
             by = 3.15 + b_i * 0.95
             _add_rect(s_div, 4.75, by, 7.8, 0.75, fill_hex=t["bg_card"], border_hex=t["border_line"], rounded=True)
             _add_text(s_div, 4.95, by + 0.16, 7.4, 0.45, f"0{b_i+1}  {b_txt}", font_size=13, bold=True, color_hex=t["text_primary"], auto_fit=True, zero_margin=True, v_align=MSO_ANCHOR.MIDDLE)
         _add_text(s_div, 11.2, 7.10, 1.58, 0.30, f"P.{page_counter:02d}", font_size=10, bold=True, color_hex=t["accent_primary"], align=PP_ALIGN.RIGHT)
         page_counter += 1
-
-    # ==========================================================================
-    # 章节 01：过渡页 + 第 4 类「研究方法与数据口径页」（含原生图表 #1）
-    # ==========================================================================
-    _add_section_divider(
-        "01", "样本概况与数据质控", "Data Hygiene & Methodology",
-        [
-            f"原始回收问卷 {qc_res['total_n']} 份，经三道自动化质控规则清洗后保留有效样本 {qc_res['valid_n']} 份（有效率 {qc_res['valid_rate']:.1f}%）",
-            "明确规定全报告显著性星号准则（* p<0.05, ** p<0.01, *** p<0.001）与效应量阈值",
-            "建立双层质量防火墙：剔除直线作答与答题时长 <30 秒的高风险无效样本",
-        ]
-    )
-
-    # Slide 4: 第 4 类 — 研究方法与数据口径页 (左栏质控原生图表 + 右栏统计口径表)
-    s_meth = prs.slides.add_slide(blank_layout)
-    _set_slide_background(s_meth, t["bg_canvas"])
-    _add_slide_header_and_footer(
-        s_meth, t, "01 样本概况与数据质控 · 方法口径",
-        f"质控后有效样本率达 {qc_res['valid_rate']:.1f}%（n={qc_res['valid_n']}），严格执行多维异常清洗与显著性标准",
-        base_footnote, page_counter,
-    )
-    # 左栏：原生 PPT 图表 #1（质控样本分布）
-    qc_df = pd.DataFrame([
-        {"质控环节": "原始总样本", "样本数": int(qc_res["total_n"])},
-        {"质控环节": "质控有效样本", "样本数": int(qc_res["valid_n"])},
-        {"质控环节": "直线作答剔除", "样本数": int(qc_res["straight_n"])},
-        {"质控环节": "过快作答剔除", "样本数": int(qc_res["speed_n"])},
-        {"质控环节": "重复ID剔除", "样本数": int(qc_res["dup_n"])},
-    ])
-    c_data1 = CategoryChartData()
-    c_data1.categories = qc_df["质控环节"].tolist()
-    c_data1.add_series("样本份数", qc_df["样本数"].tolist())
-    ch_shp1 = s_meth.shapes.add_chart(
-        XL_CHART_TYPE.COLUMN_CLUSTERED, PptInches(0.60), PptInches(1.25), PptInches(5.9), PptInches(4.78), c_data1
-    )
-    _style_native_chart(ch_shp1.chart, t, show_legend=False)
-
-    # 右栏：统计检验与效应量口径对照表
-    conv_df = pd.DataFrame([
-        {"分析场景": "分类交叉表", "统计检验方法": "Pearson χ² / Fisher", "效应量指标": "Cramér's V (0.1/0.3/0.5)", "显著性判准": "* p<0.05, ** p<0.01"},
-        {"分析场景": "两组均值对比", "统计检验方法": "Welch t / Mann-Whitney", "效应量指标": "Cohen's d (0.2/0.5/0.8)", "显著性判准": "*** p<0.001, ns 不显著"},
-        {"分析场景": "多组均值对比", "统计检验方法": "ANOVA F / Kruskal H", "效应量指标": "η² (0.01/0.06/0.14)", "显著性判准": "双侧检验 α = 0.05"},
-        {"分析场景": "量表信效度", "统计检验方法": "Cronbach α / EFA", "效应量指标": "α ≥ 0.70, KMO ≥ 0.70", "显著性判准": "Bartlett p < 0.001"},
-        {"分析场景": "回归与路径模型", "统计检验方法": "OLS / Logistic / SEM", "效应量指标": "R², Adj R², OR, AUC", "显著性判准": "VIF < 5 无共线性"},
-    ])
-    _add_text(s_meth, 6.75, 1.25, 6.0, 0.38, "全报告统计检验与效应量口径规范表", font_size=13, bold=True, color_hex=t["accent_primary"])
-    _add_ppt_table(s_meth, conv_df, 6.75, 1.72, 6.0, 4.15, t, max_rows=6)
-    _add_conclusion_strip(s_meth, t, qc_res["conclusion"])
-    _write_slide_notes_markdown(s_meth, "研究方法与数据质控口径", qc_res["conclusion"], qc_df)
-    page_counter += 1
-
-    # ==========================================================================
-    # 章节 02：消费者画像与单题洞察
-    # ==========================================================================
-    _add_section_divider(
-        "02", "消费者画像与单题洞察", "Consumer Demographics & Single-Question Insights",
-        [
-            "高频刚需特征显著：每周饮用 1–5 杯及每天饮用人群合计占比超 75%",
-            "核心人口学画像：25–35 岁青年白领占半壁江山，长三角四省市贡献 76% 样本",
-            "品类与口碑表现：生椰拿铁与经典拿铁稳居前二，品牌整体净推荐值 NPS 达正向区间",
-        ]
-    )
 
     # 辅助函数：添加「原生可编辑图表 + 右侧数据表/卡片」分析页（Layout A / B 轮换）
     def _add_native_chart_slide(
@@ -614,12 +818,10 @@ def build_ppt_report(
             c_data.add_series(str(vc), pd.to_numeric(df_src[vc], errors="coerce").fillna(0).tolist())
 
         if layout_mode == "A":
-            # 版式 A：左图 60% + 右表 36%
             ch_s = s.shapes.add_chart(chart_type, PptInches(0.55), PptInches(1.18), PptInches(7.35), PptInches(4.82), c_data)
             _style_native_chart(ch_s.chart, t, show_legend=(len(val_cols) > 1))
             _add_ppt_table(s, df_src, 8.10, 1.26, 4.65, 4.60, t, max_rows=8)
         else:
-            # 版式 B：上方大图 + 下方三栏关键指标卡
             ch_s = s.shapes.add_chart(chart_type, PptInches(0.55), PptInches(1.16), PptInches(12.2), PptInches(3.62), c_data)
             _style_native_chart(ch_s.chart, t, show_legend=(len(val_cols) > 1))
             for k_i in range(min(3, len(df_src))):
@@ -645,239 +847,508 @@ def build_ppt_report(
         src_df = bundle["source_df"]
 
         if layout_mode == "MAP":
-            # 地图专用单独成页版式：左侧竖版地图按高度自适应保持原比例（不拉伸变形），右侧省份分布明细表，不与任何其他图表挤在一页
             s.shapes.add_picture(io.BytesIO(bundle["png_bytes"]), PptInches(1.10), PptInches(1.14), height=PptInches(4.92))
             _add_ppt_table(s, src_df, 6.00, 1.22, 6.68, 4.75, t, max_rows=10)
         elif layout_mode == "A":
-            # 版式 A：左图 + 右侧核心数据表
             s.shapes.add_picture(io.BytesIO(bundle["png_bytes"]), PptInches(0.55), PptInches(1.18), width=PptInches(7.65))
             _add_ppt_table(s, src_df, 8.45, 1.24, 4.32, 4.75, t, max_rows=8)
         elif layout_mode == "B":
-            # 版式 B：全宽居中大图（控制高度不超过底部两行洞察条）
             s.shapes.add_picture(io.BytesIO(bundle["png_bytes"]), PptInches(2.40), PptInches(1.15), width=PptInches(8.50))
         elif layout_mode == "C" and bundle_right is not None:
-            # 版式 C：左右双图并排对比
             svg_media_blobs.append((slide_num, 1, bundle_right["chart_id"], bundle_right["svg_bytes"]))
             s.shapes.add_picture(io.BytesIO(bundle["png_bytes"]), PptInches(0.55), PptInches(1.32), width=PptInches(5.95))
             s.shapes.add_picture(io.BytesIO(bundle_right["png_bytes"]), PptInches(6.75), PptInches(1.32), width=PptInches(5.95))
+        else:
+            s.shapes.add_picture(io.BytesIO(bundle["png_bytes"]), PptInches(0.55), PptInches(1.18), width=PptInches(7.65))
+            _add_ppt_table(s, src_df, 8.45, 1.24, 4.32, 4.75, t, max_rows=8)
 
         _add_conclusion_strip(s, t, bundle["conclusion"])
         _write_slide_notes_markdown(s, bundle["title"], bundle["conclusion"], src_df)
         page_counter += 1
 
-    # 1) 原生图表 #2 (Layout A): 消费频次分布
-    freq_res = su.analyze_categorical_question(valid_df["消费频次"])
-    _add_native_chart_slide(
-        "02 消费者画像 · 单题频数分布",
-        f"消费频次：「{freq_res['table'].iloc[0]['选项']}」居首（{freq_res['table'].iloc[0]['占比(%)']:.1f}%），周频消费成主流",
-        freq_res["conclusion"], freq_res["table"], "选项", ["占比(%)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="A",
-    )
+    ch_idx = 0
 
-    # 2) 原生图表 #3 (Layout B): 年龄段分布
-    age_res = su.analyze_categorical_question(valid_df["年龄段"])
-    _add_native_chart_slide(
-        "02 消费者画像 · 人口学年龄层",
-        f"年龄结构：「{age_res['table'].iloc[0]['选项']}」占比最高（{age_res['table'].iloc[0]['占比(%)']:.1f}%），中青年白领为核心",
-        age_res["conclusion"], age_res["table"], "选项", ["占比(%)"], XL_CHART_TYPE.COLUMN_CLUSTERED, layout_mode="B",
-    )
+    # ==========================================================================
+    # 章节 01：样本概况与数据质控
+    # ==========================================================================
+    if "ch1_overview" in active_chapters:
+        ch_idx += 1
+        ch_code = f"{ch_idx:02d}"
+        skipped_note = (
+            "；".join(qc_res.get("skipped_rules", []))
+            if qc_res.get("skipped_rules")
+            else "重复样本、直线作答与答题过快三道自动化规则全量核验通过"
+        )
+        _add_section_divider(
+            ch_code, "样本概况与数据质控", "Data Hygiene & Methodology",
+            [
+                f"原始回收问卷 {qc_res['total_n']} 份，质控后保留有效样本 {qc_res['valid_n']} 份（有效率 {qc_res['valid_rate']:.1f}%）",
+                "明确规定全报告显著性星号准则（* p<0.05, ** p<0.01, *** p<0.001）与效应量阈值",
+                skipped_note,
+            ],
+        )
 
-    # 3) 原生图表 #4 (Layout A): 性别构成甜甜圈图
-    gen_res = su.analyze_categorical_question(valid_df["性别"])
-    _add_native_chart_slide(
-        "02 消费者画像 · 性别构成",
-        f"性别比例：「{gen_res['table'].iloc[0]['选项']}」占 {gen_res['table'].iloc[0]['占比(%)']:.1f}%，男女受访者整体均衡",
-        gen_res["conclusion"], gen_res["table"], "选项", ["频数"], XL_CHART_TYPE.DOUGHNUT, layout_mode="A",
-    )
+        s_meth = prs.slides.add_slide(blank_layout)
+        _set_slide_background(s_meth, t["bg_canvas"])
+        _add_slide_header_and_footer(
+            s_meth, t, f"{ch_code} 样本概况与数据质控 · 方法口径",
+            f"质控后有效样本率达 {qc_res['valid_rate']:.1f}%（n={qc_res['valid_n']}），严格执行异常清洗与统计显著性标准",
+            base_footnote, page_counter,
+        )
+        qc_df = pd.DataFrame([
+            {"质控环节": "原始总样本", "样本数": int(qc_res["total_n"])},
+            {"质控环节": "质控有效样本", "样本数": int(qc_res["valid_n"])},
+            {"质控环节": "直线作答剔除", "样本数": int(qc_res["straight_n"])},
+            {"质控环节": "过快作答剔除", "样本数": int(qc_res["speed_n"])},
+            {"质控环节": "重复作答剔除", "样本数": int(qc_res["dup_n"])},
+        ])
+        c_data1 = CategoryChartData()
+        c_data1.categories = qc_df["质控环节"].tolist()
+        c_data1.add_series("样本份数", qc_df["样本数"].tolist())
+        ch_shp1 = s_meth.shapes.add_chart(
+            XL_CHART_TYPE.COLUMN_CLUSTERED, PptInches(0.60), PptInches(1.25), PptInches(5.9), PptInches(4.78), c_data1
+        )
+        _style_native_chart(ch_shp1.chart, t, show_legend=False)
 
-    # 4) 原生图表 #5 (Layout B): 多选题偏好品类
-    mc_res = su.split_multiple_choice(valid_df["偏好品类"])
-    _add_native_chart_slide(
-        "02 消费者画像 · 多选品类偏好",
-        f"品类偏好：「{mc_res['freq_df'].iloc[0]['选项']}」普及率高达 {mc_res['freq_df'].iloc[0]['普及率(% of Cases)']:.1f}%，稳居爆款榜首",
-        mc_res["conclusion"], mc_res["freq_df"], "选项", ["普及率(% of Cases)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="B",
-    )
+        conv_df = pd.DataFrame([
+            {"分析场景": "分类交叉表", "统计检验方法": "Pearson χ² / Fisher", "效应量指标": "Cramér's V (0.1/0.3/0.5)", "显著性判准": "* p<0.05, ** p<0.01"},
+            {"分析场景": "两组均值对比", "统计检验方法": "Welch t / Mann-Whitney", "效应量指标": "Cohen's d (0.2/0.5/0.8)", "显著性判准": "*** p<0.001, ns 不显著"},
+            {"分析场景": "多组均值对比", "统计检验方法": "ANOVA F / Kruskal H", "效应量指标": "η² (0.01/0.06/0.14)", "显著性判准": "双侧检验 α = 0.05"},
+            {"分析场景": "量表信效度", "统计检验方法": "Cronbach α / EFA", "效应量指标": "α ≥ 0.70, KMO ≥ 0.70", "显著性判准": "Bartlett p < 0.001"},
+            {"分析场景": "回归与路径模型", "统计检验方法": "OLS / Logistic / SEM", "效应量指标": "R², Adj R², OR, AUC", "显著性判准": "VIF < 5 无共线性"},
+        ])
+        _add_text(s_meth, 6.75, 1.25, 6.0, 0.38, "全报告统计检验与效应量口径规范表", font_size=13, bold=True, color_hex=t["accent_primary"])
+        _add_ppt_table(s_meth, conv_df, 6.75, 1.72, 6.0, 4.15, t, max_rows=6)
+        _add_conclusion_strip(s_meth, t, qc_res["conclusion"])
+        _write_slide_notes_markdown(s_meth, "研究方法与数据质控口径", qc_res["conclusion"], qc_df)
+        findings_collector.append((
+            f"原始样本 {qc_res['total_n']} 份，质控后有效 n={qc_res['valid_n']}（有效率 {qc_res['valid_rate']:.1f}%）",
+            f"P.{page_counter:02d}",
+            "全部后续描述统计、假设检验与多变量建模均基于清洗后的有效样本执行",
+            "消除无效噪声样本干扰",
+        ))
+        page_counter += 1
 
-    # 5) 矢量 SVG 图 #1 (Layout MAP 单独成页): 44-区域分布地图（独占 P.10，不与其他图挤在一页）
-    b_map = cu.chart_44_region_map(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("02 消费者画像 · 样本区域分布地图", b_map, layout_mode="MAP")
+    # ==========================================================================
+    # 章节 02：核心题目分布与单题洞察
+    # ==========================================================================
+    if "ch2_single" in active_chapters and caps["modules"]["single_question"]:
+        ch_idx += 1
+        ch_code = f"{ch_idx:02d}"
+        s_bullets = []
+        if caps["single_cols"]:
+            s_bullets.append(f"单选题频数与构成分布：共识别 {len(caps['single_cols'])} 道单选题，定位首位核心选项与帕累托集中度")
+        if caps["multi_cols"]:
+            s_bullets.append(f"多选题普及率分析：区分作答人数普及率(% of Cases)与响应人次占比(% of Responses)")
+        if caps["scale_cols"] or caps["numeric_cols"] or caps["nps_cols"]:
+            s_bullets.append("连续与态度指标诊断：结合置信区间、发散堆叠与核密度刻画集中趋势与离散度")
+        while len(s_bullets) < 3:
+            s_bullets.append("全图表同步写入备注栏 Markdown 源数据表与原生 XML / 矢量 SVG 双层可编辑对象")
 
-    # 6) 矢量 SVG 图 #2 & #3 (Layout C 双图对比): 13-NPS仪表盘 + 14-人口学金字塔
-    b_nps = cu.chart_13_nps_gauge(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    b_pyr = cu.chart_14_pyramid(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("02 消费者画像 · 品牌口碑与人口学结构", b_nps, layout_mode="C", bundle_right=b_pyr)
+        _add_section_divider(ch_code, "核心题目分布与单题洞察", "Single-Question Distributions & Insights", s_bullets)
 
-    # 7) 矢量 SVG 图 #4 (Layout A): 11-发散堆叠条形图
-    b_likert = cu.chart_11_likert_diverging(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("02 消费者画像 · 量表态度分布", b_likert, layout_mode="A")
+        # 单选题原生图表（优先采用基准顺序，通用数据自动选取信息量最高的前 3 道单选题）
+        single_ordered = []
+        for pref_c in ["消费频次", "年龄段", "性别"]:
+            if pref_c in caps["single_cols"]:
+                single_ordered.append(pref_c)
+        for c in caps["single_cols"]:
+            if c not in single_ordered:
+                single_ordered.append(c)
+
+        if len(single_ordered) >= 1:
+            c1 = single_ordered[0]
+            r1 = su.analyze_categorical_question(valid_df[c1])
+            top1 = r1["table"].iloc[0]
+            _add_native_chart_slide(
+                f"{ch_code} 单题洞察 · {c1}",
+                f"{c1}：「{top1['选项']}」居首（{top1['占比(%)']:.1f}%，n={top1['频数']}）",
+                r1["conclusion"], r1["table"], "选项", ["占比(%)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="A",
+            )
+            findings_collector.append((
+                f"「{c1}」中首位选项为「{top1['选项']}」，占比 {top1['占比(%)']:.1f}%（n={top1['频数']}）",
+                f"P.{page_counter-1:02d}",
+                f"围绕主流群体「{top1['选项']}」配置核心资源与触达策略",
+                "夯实基本盘覆盖率",
+            ))
+
+        if len(single_ordered) >= 2:
+            c2 = single_ordered[1]
+            r2 = su.analyze_categorical_question(valid_df[c2])
+            top2 = r2["table"].iloc[0]
+            _add_native_chart_slide(
+                f"{ch_code} 单题洞察 · {c2}",
+                f"{c2}：「{top2['选项']}」占比最高（{top2['占比(%)']:.1f}%，n={top2['频数']}）",
+                r2["conclusion"], r2["table"], "选项", ["占比(%)"], XL_CHART_TYPE.COLUMN_CLUSTERED, layout_mode="B",
+            )
+
+        if len(single_ordered) >= 3:
+            c3 = single_ordered[2]
+            r3 = su.analyze_categorical_question(valid_df[c3])
+            top3 = r3["table"].iloc[0]
+            c3_type = XL_CHART_TYPE.DOUGHNUT if len(r3["table"]) <= 6 else XL_CHART_TYPE.BAR_CLUSTERED
+            c3_metric = ["频数"] if c3_type == XL_CHART_TYPE.DOUGHNUT else ["占比(%)"]
+            _add_native_chart_slide(
+                f"{ch_code} 单题洞察 · {c3}",
+                f"{c3}：「{top3['选项']}」占 {top3['占比(%)']:.1f}%（共 {len(r3['table'])} 个类别）",
+                r3["conclusion"], r3["table"], "选项", c3_metric, c3_type, layout_mode="A",
+            )
+
+        # 若为纯单选/少题型问卷且单选题 >= 4 道，补充矢量帕累托图丰富单题洞察
+        if not is_coffee_bench and len(single_ordered) >= 4:
+            c4 = single_ordered[3]
+            b_par = cu.render_chart_by_id("03-帕累托图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=c4)
+            _add_svg_chart_slide(f"{ch_code} 单题洞察 · {c4}帕累托分析", b_par, layout_mode="A")
+
+        # 多选题原生图表（仅当存在多选题时生成）
+        if caps["multi_cols"]:
+            mc_col = "偏好品类" if "偏好品类" in caps["multi_cols"] else caps["multi_cols"][0]
+            mc_res = su.split_multiple_choice(valid_df[mc_col])
+            mc_top = mc_res["freq_df"].iloc[0]
+            _add_native_chart_slide(
+                f"{ch_code} 单题洞察 · 多选题（{mc_col}）",
+                f"{mc_col}：「{mc_top['选项']}」普及率达 {mc_top['普及率(% of Cases)']:.1f}%，位居多选榜首",
+                mc_res["conclusion"], mc_res["freq_df"], "选项", ["普及率(% of Cases)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="B",
+            )
+
+        # 区域分布地图（仅当数据含真实中国省份列时单独成页生成！）
+        if sm["map"]["enabled"]:
+            b_map = cu.render_chart_by_id("44-区域分布地图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=sm["map"]["col"])
+            _add_svg_chart_slide(f"{ch_code} 单题洞察 · 样本区域分布地图", b_map, layout_mode="MAP")
+
+        # NPS 仪表盘 & 人口学金字塔（按实际存在的题型组合）
+        if caps["nps_cols"] and len(single_ordered) >= 2:
+            b_nps = cu.render_chart_by_id("13-NPS仪表盘", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=caps["nps_cols"][0])
+            age_c = "年龄段" if "年龄段" in single_ordered else single_ordered[0]
+            gen_c = "性别" if "性别" in single_ordered else single_ordered[1]
+            b_pyr = cu.render_chart_by_id("14-人口学金字塔", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, age_col=age_c, gender_col=gen_c)
+            _add_svg_chart_slide(f"{ch_code} 单题洞察 · 净推荐值与双向人群结构", b_nps, layout_mode="C", bundle_right=b_pyr)
+        elif caps["nps_cols"]:
+            b_nps = cu.render_chart_by_id("13-NPS仪表盘", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=caps["nps_cols"][0])
+            _add_svg_chart_slide(f"{ch_code} 单题洞察 · 净推荐值 (NPS) 诊断", b_nps, layout_mode="A")
+
+        # 量表题发散堆叠条形图（仅当存在量表题时生成）
+        if len(caps["scale_cols"]) >= 1:
+            b_likert = cu.render_chart_by_id("11-发散堆叠条形图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 单题洞察 · 量表态度发散分布", b_likert, layout_mode="A")
+
+        # 若非基准集且含数值题，生成直方图+核密度页
+        if not is_coffee_bench and caps["numeric_cols"]:
+            nc0 = caps["numeric_cols"][0]
+            b_hist = cu.render_chart_by_id("07-直方图与核密度", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=nc0)
+            _add_svg_chart_slide(f"{ch_code} 单题洞察 · {nc0}连续分布", b_hist, layout_mode="A")
 
     # ==========================================================================
     # 章节 03：交叉分析与群体差异
     # ==========================================================================
-    _add_section_divider(
-        "03", "交叉分析与群体差异", "Cross-Tabulation & Subgroup Comparisons",
-        [
-            "卡方独立性检验与标准化残差热力图：定位各年龄段在消费频次上的局部偏好聚集",
-            "参数/非参数双轨均值检验：结合雨云图展示不同性别与频次群体的月消费额全息分布",
-            "品牌留存与流转：桑基图揭示从上次购买到最常购买的品牌转化路径与锁客能力",
+    if "ch3_cross" in active_chapters and caps["modules"]["crosstab"]:
+        ch_idx += 1
+        ch_code = f"{ch_idx:02d}"
+        c_bullets = []
+        if caps["cross_cat_cat"]:
+            c_bullets.append("卡方独立性检验与标准化残差热力图：定位分类变量间的显著关联与局部聚集")
+        if caps["cross_cat_num"]:
+            c_bullets.append("参数/非参数双轨均值检验：结合雨云图展示不同子群在连续指标上的全息分布")
+        if sm["sankey"]["enabled"]:
+            c_bullets.append("流转留存矩阵：桑基图揭示前后期选择路径与核心留存率")
+        while len(c_bullets) < 3:
+            c_bullets.append("自动报告效应量（Cramér's V / Cohen's d / η²）及 Bonferroni 列比例比较结果")
+
+        _add_section_divider(ch_code, "交叉分析与群体差异", "Cross-Tabulation & Subgroup Comparisons", c_bullets)
+
+        if caps["cross_cat_cat"]:
+            r_col = "年龄段" if "年龄段" in caps["single_cols"] else caps["single_cols"][0]
+            c_col = "消费频次" if ("消费频次" in caps["single_cols"] and r_col != "消费频次") else next(c for c in caps["single_cols"] if c != r_col)
+            ct_res = su.crosstab_chi2_analysis(valid_df, r_col, c_col)
+            r_pct_df = ct_res["row_pct_df"].reset_index().rename(columns={"index": r_col})
+            _add_native_chart_slide(
+                f"{ch_code} 交叉分析 · {r_col} × {c_col}",
+                f"不同{r_col}的{c_col}分布对比（χ²={ct_res['chi2']:.2f}, Cramér's V={ct_res['cramers_v']:.3f}）",
+                ct_res["conclusion"], r_pct_df, r_col, list(ct_res["row_pct_df"].columns[:5]), XL_CHART_TYPE.BAR_STACKED_100, layout_mode="A",
+            )
+            findings_collector.append((
+                f"{r_col} × {c_col}交叉检验：χ²={ct_res['chi2']:.2f} (p={ct_res['p_value']:.4f}, Cramér's V={ct_res['cramers_v']:.3f})",
+                f"P.{page_counter-1:02d}",
+                "依据显著正残差单元格实施细分人群差异化运营" if ct_res["p_value"] < 0.05 else "各子群结构分布高度一致，可采取统一触达策略",
+                "提升细分投放精准度",
+            ))
+
+        if caps["cross_cat_num"]:
+            g_col = "性别" if "性别" in caps["single_cols"] else caps["single_cols"][0]
+            n_col = "月消费额" if "月消费额" in caps["numeric_cols"] else (caps["numeric_cols"] + caps["scale_cols"] + caps["nps_cols"])[0]
+            b_rain = cu.render_chart_by_id("09-雨云图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, group_col=g_col, num_col=n_col)
+            _add_svg_chart_slide(f"{ch_code} 交叉分析 · {g_col} × {n_col}雨云图", b_rain, layout_mode="B")
+
+        if caps["cross_cat_cat"]:
+            r_col = "年龄段" if "年龄段" in caps["single_cols"] else caps["single_cols"][0]
+            c_col = "消费频次" if ("消费频次" in caps["single_cols"] and r_col != "消费频次") else next(c for c in caps["single_cols"] if c != r_col)
+            b_resid = cu.render_chart_by_id("18-卡方残差热力图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, row_col=r_col, col_col=c_col)
+            if sm["sankey"]["enabled"]:
+                p_c, cur_c = sm["sankey"]["cols"]
+                b_sankey = cu.render_chart_by_id("30-桑基图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, prev_col=p_c, curr_col=cur_c)
+                _add_svg_chart_slide(f"{ch_code} 交叉分析 · 残差异常检测与流转桑基图", b_resid, layout_mode="C", bundle_right=b_sankey)
+            else:
+                _add_svg_chart_slide(f"{ch_code} 交叉分析 · 调整后标准化残差热力图", b_resid, layout_mode="A")
+
+    # ==========================================================================
+    # 章节 04：量表信效度与驱动力建模（仅当量表/数值建模条件满足时生成）
+    # ==========================================================================
+    if "ch4_scale" in active_chapters and caps["modules"]["scale_modeling"]:
+        ch_idx += 1
+        ch_code = f"{ch_idx:02d}"
+        _add_section_divider(
+            ch_code, "量表信效度与驱动力建模", "Psychometrics, SEM & Machine Learning Drivers",
+            [
+                "量表测量与相关结构检验：评估内部一致性信度 Cronbach's α 与多变量相关矩阵",
+                "路径与回归驱动力剖析：量化各核心感知/态度维度对结果变量的净效应系数",
+                "机器学习交叉验证：结合随机森林特征重要性、ROC 曲线与决策树锁定关键分水岭",
+            ],
+        )
+
+        if sm["sem"]["enabled"]:
+            b_sem = cu.render_chart_by_id("34-结构方程路径图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 量表与建模 · 结构方程路径模型 (SEM)", b_sem, layout_mode="A")
+            findings_collector.append((
+                b_sem["title"],
+                f"P.{page_counter-1:02d}",
+                "优先强化标准化路径系数最高的核心驱动潜变量表现",
+                "放大关键驱动因子杠杆效应",
+            ))
+        else:
+            b_corr = cu.render_chart_by_id("26-相关性热力图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 量表与建模 · 多变量相关性热力图", b_corr, layout_mode="A")
+
+        if len(caps["scale_cols"]) + len(caps["numeric_cols"]) >= 2 and len(valid_df) >= 25:
+            rf_res = su.calc_random_forest_model(valid_df)
+            _add_native_chart_slide(
+                f"{ch_code} 量表与建模 · 随机森林特征重要性",
+                f"随机森林重要性排序：前两大特征合计贡献 {rf_res['importance_df'].head(2)['重要性占比(%)'].sum():.1f}%（准确率 {rf_res['accuracy']*100:.1f}%）",
+                rf_res["conclusion"], rf_res["importance_df"], "特征名称", ["重要性占比(%)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="B",
+            )
+            b_roc = cu.render_chart_by_id("39-ROC曲线图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            b_dt = cu.render_chart_by_id("41-决策树规则图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 量表与建模 · ROC 判别效能与决策树规则", b_roc, layout_mode="C", bundle_right=b_dt)
+
+    # ==========================================================================
+    # 章节 05：专项研究模型与文本洞察（严格仅生成当前数据真正支持的专项模型）
+    # ==========================================================================
+    has_any_special = (
+        any(sm[k]["enabled"] for k in ("funnel", "conjoint", "ipa", "psm", "kano", "clustering", "ca"))
+        or caps["modules"]["text_analysis"]
+    )
+    if "ch5_special" in active_chapters and has_any_special:
+        ch_idx += 1
+        ch_code = f"{ch_idx:02d}"
+        sp_bullets = []
+        if sm["funnel"]["enabled"] or sm["kano"]["enabled"]:
+            sp_bullets.append("转化漏斗与 KANO 需求分层：识别全链路流失瓶颈及必备/期望/魅力属性优先级")
+        if sm["psm"]["enabled"] or sm["conjoint"]["enabled"]:
+            sp_bullets.append("价格敏感度（PSM）与联合分析：测算最优定价区间及多属性部分价值权重")
+        if sm["ipa"]["enabled"] or sm["clustering"]["enabled"] or sm["ca"]["enabled"]:
+            sp_bullets.append("空间定位与分群画像：结合对应分析、IPA 矩阵或 K-Means 聚类指导精准施策")
+        if caps["modules"]["text_analysis"]:
+            sp_bullets.append("非结构化开放文本挖掘：jieba 分词高频语义词云与焦点维度情感拆解")
+        while len(sp_bullets) < 3:
+            sp_bullets.append("严格依据当前上传问卷的数据列结构自适应启用匹配模型")
+
+        _add_section_divider(ch_code, "市调专项与策略洞察", "Market Research Models & Text Analytics", sp_bullets)
+
+        if sm["funnel"]["enabled"]:
+            f_cols = sm["funnel"]["cols"]
+            f_short = ["知名", "考虑", "购买", "复购"] if f_cols == ["品牌知名", "品牌考虑", "品牌购买", "品牌复购"] else [str(c) for c in f_cols]
+            fn_res = su.calc_brand_funnel(valid_df, f_cols, f_short)
+            _add_native_chart_slide(
+                f"{ch_code} 市调专项 · 全链路转化漏斗",
+                f"转化漏斗各级人数依次为 {'→'.join(map(str, fn_res['counts']))}，总转化率 {fn_res['table'].iloc[-1]['占首级比例(%)']:.1f}%",
+                fn_res["conclusion"], fn_res["table"], "漏斗阶段", ["人数", "逐级转化率(%)"], XL_CHART_TYPE.COLUMN_CLUSTERED, layout_mode="A",
+            )
+
+        if sm["conjoint"]["enabled"]:
+            cj_cols = sm["conjoint"]["cols"]
+            cj_res = su.calc_conjoint_analysis(valid_df, attr_cols=cj_cols["attr_cols"], rating_col=cj_cols["rating_col"])
+            _add_native_chart_slide(
+                f"{ch_code} 市调专项 · 联合分析相对重要性",
+                f"联合分析：{cj_res['importance_df'].iloc[0]['属性名称']}相对重要性达 {cj_res['importance_df'].iloc[0]['相对重要性(%)']:.1f}%，最优组合「{cj_res['best_combo']}」",
+                cj_res["conclusion"], cj_res["importance_df"], "属性名称", ["相对重要性(%)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="B",
+            )
+
+        if sm["ipa"]["enabled"] and sm["psm"]["enabled"]:
+            b_ipa = cu.render_chart_by_id("32-IPA四象限图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            b_psm = cu.render_chart_by_id("33-PSM价格敏感度曲线", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · IPA 四象限矩阵与 PSM 最优定价模型", b_ipa, layout_mode="C", bundle_right=b_psm)
+        elif sm["ipa"]["enabled"]:
+            b_ipa = cu.render_chart_by_id("32-IPA四象限图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · IPA 重要性-满意度四象限", b_ipa, layout_mode="A")
+        elif sm["psm"]["enabled"]:
+            b_psm = cu.render_chart_by_id("33-PSM价格敏感度曲线", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · PSM 价格敏感度测试", b_psm, layout_mode="A")
+
+        if sm["kano"]["enabled"] and sm["clustering"]["enabled"]:
+            b_kano = cu.render_chart_by_id("35-KANO模型图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            b_persona = cu.render_chart_by_id("45-消费者画像卡片", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · KANO 需求分层与典型消费者画像", b_kano, layout_mode="C", bundle_right=b_persona)
+        elif sm["kano"]["enabled"]:
+            b_kano = cu.render_chart_by_id("35-KANO模型图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · KANO 需求分层模型", b_kano, layout_mode="A")
+        elif sm["clustering"]["enabled"]:
+            b_persona = cu.render_chart_by_id("45-消费者画像卡片", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · 典型消费者分群画像", b_persona, layout_mode="A")
+
+        # 若为纯单选/多选问卷（无 IPA/PSM/KANO），自动呈现对应分析双标图展示深层定位关系
+        if sm["ca"]["enabled"] and not (sm["ipa"]["enabled"] or sm["psm"]["enabled"] or sm["kano"]["enabled"]):
+            ca_c1, ca_c2 = sm["ca"]["cols"][0], sm["ca"]["cols"][1]
+            b_ca = cu.render_chart_by_id("31-对应分析双标图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, row_col=ca_c1, col_col=ca_c2)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · {ca_c1} × {ca_c2}对应分析", b_ca, layout_mode="A")
+            findings_collector.append((
+                b_ca["title"],
+                f"P.{page_counter-1:02d}",
+                f"结合双标图同象限紧邻关系优化「{ca_c1}」与「{ca_c2}」组合策略",
+                "强化心智关联匹配",
+            ))
+
+        if caps["modules"]["text_analysis"]:
+            t_col = "开放题短评" if "开放题短评" in caps["text_cols"] else caps["text_cols"][0]
+            b_wc = cu.render_chart_by_id("46-词云与词频组合图", valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo, col=t_col)
+            _add_svg_chart_slide(f"{ch_code} 市调专项 · 开放题词云与高频词统计", b_wc, layout_mode="A")
+
+    # 若用户在工作台手动钉选了额外分析节且开启合并，按版式追加
+    if export_options.get("include_custom_sections") and report_sections:
+        for sec in report_sections:
+            if sec.get("png_bytes") and isinstance(sec.get("table"), pd.DataFrame):
+                s_cus = prs.slides.add_slide(blank_layout)
+                _set_slide_background(s_cus, t["bg_canvas"])
+                _add_slide_header_and_footer(
+                    s_cus, t, "CUSTOM INSIGHT · 自定义钉选图表",
+                    str(sec.get("title", "自定义分析项")), base_footnote, page_counter,
+                )
+                s_cus.shapes.add_picture(io.BytesIO(sec["png_bytes"]), PptInches(0.55), PptInches(1.18), width=PptInches(7.65))
+                _add_ppt_table(s_cus, sec["table"], 8.45, 1.24, 4.32, 4.75, t, max_rows=8)
+                _add_conclusion_strip(s_cus, t, str(sec.get("conclusion", "")))
+                _write_slide_notes_markdown(s_cus, str(sec.get("title", "")), str(sec.get("conclusion", "")), sec["table"])
+                page_counter += 1
+
+    # ==========================================================================
+    # 第 6 & 7 类：核心结论与行动建议页 + 技术附录页
+    # ==========================================================================
+    if "ch6_summary" in active_chapters:
+        s_rec = prs.slides.add_slide(blank_layout)
+        _set_slide_background(s_rec, t["bg_canvas"])
+        _add_slide_header_and_footer(
+            s_rec, t, "EXECUTIVE SUMMARY · 核心发现与策略建议",
+            "基于实测统计证据的核心研究发现与行动矩阵",
+            base_footnote, page_counter,
+        )
+        if is_coffee_bench and sm["psm"]["enabled"]:
+            pc = sm["psm"]["cols"]
+            psm_s = su.calc_van_westendorp(valid_df, pc["too_cheap"], pc["cheap"], pc["expensive"], pc["too_expensive"])
+            rec_df = pd.DataFrame([
+                {
+                    "核心数据发现 (Finding)": f"最优价格点 OPP={psm_s['opp'][0]:.2f}元，可接受价格带 [{psm_s['pmc'][0]:.1f},{psm_s['pme'][0]:.1f}]元",
+                    "证据模块": "PSM / 联合分析",
+                    "策略行动建议 (Action)": "将主力产品券后到手价锚定在可接受价格带核心区间，推出周卡套餐锁住高频客群",
+                    "预期业务影响": "提升考虑→购买转化率",
+                },
+                {
+                    "核心数据发现 (Finding)": "品质感知与价格感知双轮显著正向驱动推荐意愿 (p < 0.001)",
+                    "证据模块": "SEM 路径模型",
+                    "策略行动建议 (Action)": "严控出品稳定性底线，围绕头部高普及率品类打造旗舰大单品",
+                    "预期业务影响": "拉升净推荐值 (NPS)",
+                },
+                {
+                    "核心数据发现 (Finding)": "IPA 四象限识别出高重要低满意要素为首要改进抓手",
+                    "证据模块": "IPA / KANO",
+                    "策略行动建议 (Action)": "针对优先改进象限要素优化高峰期履约动线与性价比感知",
+                    "预期业务影响": "降低关键触点流失率",
+                },
+                {
+                    "核心数据发现 (Finding)": "K-Means 识别出三大典型客群，不同分群消费力与敏感度分化鲜明",
+                    "证据模块": "聚类画像",
+                    "策略行动建议 (Action)": "实施分层会员运营：高频价值群推精品新品，价格敏感群推满减券包",
+                    "预期业务影响": "提升复购留存率",
+                },
+            ])
+            rec_strip = "策略优先级排序：先守住必备质量底线，再围绕高权重驱动因子与优先改进象限精准发力。"
+        else:
+            rows_rec = []
+            for f_txt, pg_ref, act_txt, imp_txt in findings_collector[:4]:
+                rows_rec.append({
+                    "核心数据发现 (Finding)": f_txt,
+                    "证据页码": pg_ref,
+                    "策略行动建议 (Action)": act_txt,
+                    "预期业务价值": imp_txt,
+                })
+            if not rows_rec:
+                rows_rec.append({
+                    "核心数据发现 (Finding)": f"已完成 {qc_res['valid_n']} 份有效样本全量描述与推断统计",
+                    "证据页码": "全报告",
+                    "策略行动建议 (Action)": "结合各题频数/均值分布结果制定针对性改进方案",
+                    "预期业务价值": "量化支撑业务决策",
+                })
+            rec_df = pd.DataFrame(rows_rec)
+            rec_strip = f"本报告全部结论均由当前上传数据集（有效样本 n={qc_res['valid_n']}）实时统计检验生成。"
+
+        _add_ppt_table(s_rec, rec_df, 0.55, 1.30, 12.23, 4.75, t, max_rows=5)
+        _add_conclusion_strip(s_rec, t, rec_strip)
+        _write_slide_notes_markdown(s_rec, "核心结论与行动建议矩阵", rec_strip, rec_df)
+        page_counter += 1
+
+        # 附录页
+        s_app = prs.slides.add_slide(blank_layout)
+        _set_slide_background(s_app, t["bg_canvas"])
+        _add_slide_header_and_footer(
+            s_app, t, "APPENDIX · 技术附录与方法局限声明",
+            "数据质量审计、测量信效度指标与研究局限性声明",
+            base_footnote, page_counter,
+        )
+        app_rows = [
+            {
+                "技术模块": "样本质量控制审计",
+                "核心统计指标": f"原始 N={qc_res['total_n']}，有效 n={qc_res['valid_n']}（有效率 {qc_res['valid_rate']:.1f}%）",
+                "质量判定": "；".join(qc_res.get("skipped_rules", [])) if qc_res.get("skipped_rules") else "重复/直线/过快三项核验均已执行",
+            },
+            {
+                "技术模块": "题型结构自动识别",
+                "核心统计指标": f"分析题 {len(caps['analysis_cols'])} 道（单选{len(caps['single_cols'])}/多选{len(caps['multi_cols'])}/量表{len(caps['scale_cols'])}/数值{len(caps['numeric_cols'])}）",
+                "质量判定": "已自动过滤平台系统元数据列",
+            },
         ]
-    )
-
-    # 8) 原生图表 #6 (Layout A): 年龄段 × 消费频次 100% 堆叠对比
-    ct_age_freq = su.crosstab_chi2_analysis(valid_df, "年龄段", "消费频次")
-    r_pct_df = ct_age_freq["row_pct_df"].reset_index().rename(columns={"index": "年龄段"})
-    _add_native_chart_slide(
-        "03 交叉分析 · 年龄段 × 消费频次",
-        f"不同年龄段的消费频次分布对比（χ²={ct_age_freq['chi2']:.2f}, Cramér's V={ct_age_freq['cramers_v']:.3f}）",
-        ct_age_freq["conclusion"], r_pct_df, "年龄段", list(ct_age_freq["row_pct_df"].columns[:4]), XL_CHART_TYPE.BAR_STACKED_100, layout_mode="A",
-    )
-
-    # 9) 矢量 SVG 图 #5 (Layout B): 09-雨云图
-    b_rain = cu.chart_09_raincloud(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("03 交叉分析 · 性别 × 月消费额雨云图", b_rain, layout_mode="B")
-
-    # 10) 矢量 SVG 图 #6 & #7 (Layout C 双图对比): 18-卡方残差热力图 + 30-桑基图
-    b_resid = cu.chart_18_chi2_residual_heatmap(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    b_sankey = cu.chart_30_sankey(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("03 交叉分析 · 残差异常检测与品牌转换桑基图", b_resid, layout_mode="C", bundle_right=b_sankey)
-
-    # ==========================================================================
-    # 章节 04：量表信效度与驱动力建模
-    # ==========================================================================
-    _add_section_divider(
-        "04", "量表信效度与驱动力建模", "Psychometrics, SEM & Machine Learning Drivers",
-        [
-            "量表测量质量优异：价格与品质双维度 Cronbach's α 均 >0.78，EFA 两因子完美对齐题项",
-            "结构方程路径模型（S1）：价格感知（β=+0.35***）与品质感知（β=+0.36***）显著驱动 NPS",
-            "机器学习交叉验证：随机森林、决策树与 Logistic 回归（AUC>0.80）锁定核心转化阈值",
-        ]
-    )
-
-    # 11) 矢量 SVG 图 #8 (Layout A): 34-结构方程路径图
-    b_sem = cu.chart_34_sem_path(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("04 量表与建模 · 结构方程路径模型 (SEM)", b_sem, layout_mode="A")
-
-    # 12) 原生图表 #7 (Layout B): 随机森林特征重要性排序
-    rf_res = su.calc_random_forest_model(valid_df)
-    _add_native_chart_slide(
-        "04 量表与建模 · 随机森林特征重要性",
-        f"随机森林预测高推荐者：前两大核心特征合计贡献 {rf_res['importance_df'].head(2)['重要性占比(%)'].sum():.1f}%（准确率 {rf_res['accuracy']*100:.1f}%）",
-        rf_res["conclusion"], rf_res["importance_df"], "特征名称", ["重要性占比(%)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="B",
-    )
-
-    # 13) 矢量 SVG 图 #9 & #10 (Layout C 双图对比): 39-ROC曲线图 + 41-决策树规则图
-    b_roc = cu.chart_39_roc_curve(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    b_dt = cu.chart_41_decision_tree(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("04 量表与建模 · ROC 判别效能与决策树规则", b_roc, layout_mode="C", bundle_right=b_dt)
-
-    # ==========================================================================
-    # 章节 05：市调专项与策略建议
-    # ==========================================================================
-    _add_section_divider(
-        "05", "市调专项与策略建议", "Market Research Models & Strategic Roadmap",
-        [
-            "品牌转化漏斗与 KANO 模型：知名→考虑→购买→复购全链路诊断与必备/期望/魅力属性分层",
-            "价格敏感度（PSM）与联合分析（Conjoint）：最优定价点 14.85 元，价格权重达 38.2%",
-            "IPA 优先改进矩阵与消费者分群画像：聚焦性价比改进与三大典型客群精准运营",
-        ]
-    )
-
-    # 14) 原生图表 #8 (Layout A): 品牌转化漏斗
-    fn_res = su.calc_brand_funnel(valid_df, ["品牌知名", "品牌考虑", "品牌购买", "品牌复购"], ["知名", "考虑", "购买", "复购"])
-    _add_native_chart_slide(
-        "05 市调专项 · 品牌全链路漏斗",
-        f"品牌漏斗各级人数依次为 {'→'.join(map(str, fn_res['counts']))}，总转化率 {fn_res['table'].iloc[-1]['占首级比例(%)']:.1f}%",
-        fn_res["conclusion"], fn_res["table"], "漏斗阶段", ["人数", "逐级转化率(%)"], XL_CHART_TYPE.COLUMN_CLUSTERED, layout_mode="A",
-    )
-
-    # 15) 原生图表 #9 (Layout B): 联合分析属性相对重要性
-    cj_res = su.calc_conjoint_analysis()
-    _add_native_chart_slide(
-        "05 市调专项 · 联合分析相对重要性",
-        f"联合分析：价格相对重要性达 {cj_res['importance_df'].iloc[0]['相对重要性(%)']:.1f}%，最优组合「{cj_res['best_combo']}」",
-        cj_res["conclusion"], cj_res["importance_df"], "属性名称", ["相对重要性(%)"], XL_CHART_TYPE.BAR_CLUSTERED, layout_mode="B",
-    )
-
-    # 16) 矢量 SVG 图 #11 & #12 (Layout C 双图对比): 32-IPA四象限图 + 33-PSM价格敏感度曲线
-    b_ipa = cu.chart_32_ipa(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    b_psm = cu.chart_33_psm(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("05 市调专项 · IPA 四象限矩阵与 PSM 最优定价模型", b_ipa, layout_mode="C", bundle_right=b_psm)
-
-    # 17) 矢量 SVG 图 #13 & #14 (Layout C 双图对比): 35-KANO模型图 + 45-消费者画像卡片
-    b_kano = cu.chart_35_kano(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    b_persona = cu.chart_45_persona_cards(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("05 市调专项 · KANO 需求分层与典型消费者画像", b_kano, layout_mode="C", bundle_right=b_persona)
-
-    # 18) 矢量 SVG 图 #15 (Layout A): 46-词云与词频组合图
-    b_wc = cu.chart_46_wordcloud_combo(valid_df, theme_name=theme_name, settings={"for_ppt": True}, is_demo=is_demo)
-    _add_svg_chart_slide("05 市调专项 · 开放题口碑词云与词频统计", b_wc, layout_mode="A")
-
-    # ==========================================================================
-    # 第 6 类：核心结论与行动建议页 (Conclusions & Actionable Recommendations)
-    # ==========================================================================
-    s_rec = prs.slides.add_slide(blank_layout)
-    _set_slide_background(s_rec, t["bg_canvas"])
-    _add_slide_header_and_footer(
-        s_rec, t, "EXECUTIVE SUMMARY · 核心发现与策略建议",
-        "四大核心研究发现与可落地业务增长行动矩阵（证据闭环）",
-        base_footnote, page_counter,
-    )
-    rec_df = pd.DataFrame([
-        {
-            "核心数据发现 (Finding)": f"价格权重第一(38.2%)，最优价格点 OPP={psm_res['opp'][0]:.2f}元，可接受带 [{psm_res['pmc'][0]:.1f},{psm_res['pme'][0]:.1f}]元",
-            "证据页码": "P.23 / P.24",
-            "策略行动建议 (Action)": "将主力拿铁券后到手价锚定在 13–15 元黄金区间，推出周卡套餐锁住高频客群",
-            "预期业务影响": "预计提升考虑→购买转化率 +8~12%",
-        },
-        {
-            "核心数据发现 (Finding)": "品质感知(β=+0.36***)与价格感知(β=+0.35***)双轮驱动 NPS，现磨现做属必备属性(M)",
-            "证据页码": "P.18 / P.25",
-            "策略行动建议 (Action)": "严控咖啡豆萃取稳定性与防洒包装底线，升级「生椰拿铁+大杯473ml」黄金大单品",
-            "预期业务影响": "预计拉升品牌 NPS +5~8 分",
-        },
-        {
-            "核心数据发现 (Finding)": "IPA 显示「价格实惠」与「出餐速度」亟待改进，KANO 证实「出餐≤5分钟」为期望属性(O)",
-            "证据页码": "P.24 / P.25",
-            "策略行动建议 (Action)": "优化早高峰小程序预点单动线，承诺「超时免单券」消除排队痛点",
-            "预期业务影响": "预计降低早高峰流失率 -15%",
-        },
-        {
-            "核心数据发现 (Finding)": "K-Means 识别出三大典型客群，高消品质忠诚派与性价比大众主力派诉求截然不同",
-            "证据页码": "P.25 / P.26",
-            "策略行动建议 (Action)": "实施分层会员运营：对高频精品群推送季节限定SOE，对价格敏感群发放满减券包",
-            "预期业务影响": "预计提升月度复购率 +10%",
-        },
-    ])
-    _add_ppt_table(s_rec, rec_df, 0.55, 1.30, 12.23, 4.75, t, max_rows=5)
-    _add_conclusion_strip(s_rec, t, "策略优先级排序：先守住「现磨品质+防洒包装」必备底线（M），再攻坚「13-15元定价+5分钟快取」核心期望项（O）。")
-    _write_slide_notes_markdown(s_rec, "核心结论与行动建议矩阵", "四大策略闭环建议", rec_df)
-    page_counter += 1
-
-    # ==========================================================================
-    # 第 7 类：附录与方法局限说明页 (Appendix & Limitations)
-    # ==========================================================================
-    s_app = prs.slides.add_slide(blank_layout)
-    _set_slide_background(s_app, t["bg_canvas"])
-    _add_slide_header_and_footer(
-        s_app, t, "APPENDIX · 技术附录与方法局限声明",
-        "量表测量信效度汇总、事后分层加权说明与研究局限性声明",
-        base_footnote, page_counter,
-    )
-    rel_p = su.calc_reliability(valid_df, ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引"])
-    work_app = valid_df.copy()
-    work_app["品质量表3_正向"] = su.reverse_score(work_app["品质量表3_品质不稳定_反向"], max_scale=5)
-    rel_q = su.calc_reliability(work_app, ["品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"])
-    efa_all = su.calc_validity_efa(work_app, ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引", "品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"], n_factors=2)
-
-    app_df = pd.DataFrame([
-        {"技术模块": "价格感知量表 (3题)", "核心统计指标": f"Cronbach's α = {rel_p['alpha']:.3f}", "质量判定": "内部一致性良好 (>0.70)"},
-        {"技术模块": "品质感知量表 (3题含反向)", "核心统计指标": f"Cronbach's α = {rel_q['alpha']:.3f}", "质量判定": "内部一致性良好 (>0.70)"},
-        {"技术模块": "探索性因子分析 (EFA)", "核心统计指标": f"KMO = {efa_all['kmo']:.3f}, Bartlett p < 0.0001", "质量判定": f"两公因子累计解释方差 {efa_all['cum_var_pct']:.1f}%"},
-        {"技术模块": "可编辑图表工程规范", "核心统计指标": "9 个原生 XML 图表 + 16 个矢量 SVG (svgBlip) + 全页 Markdown 备注表", "质量判定": "支持 PPT / AI / Excel 深度二次编辑"},
-        {"技术模块": "方法局限声明", "核心统计指标": demo_str, "质量判定": "横断面相关性与回归不直接等价于因果推断"},
-    ])
-    _add_ppt_table(s_app, app_df, 0.55, 1.30, 12.23, 4.75, t, max_rows=6)
-    _add_conclusion_strip(s_app, t, "本报告所有图表源数据均已同步嵌入对应幻灯片备注栏（Notes Markdown）及 Word 数据附录。")
-    _write_slide_notes_markdown(s_app, "技术附录与信效度汇总", "量表信效度与方法声明", app_df)
+        if len(caps["scale_cols"]) >= 2:
+            dims = caps["scale_dims"]
+            if dims:
+                for d_nm, d_cols in list(dims.items())[:2]:
+                    w_tmp = valid_df.copy()
+                    if "品质量表3_品质不稳定_反向" in d_cols:
+                        w_tmp["品质量表3_正向"] = su.reverse_score(w_tmp["品质量表3_品质不稳定_反向"], max_scale=5)
+                        d_cols = ["品质量表3_正向" if c == "品质量表3_品质不稳定_反向" else c for c in d_cols]
+                    rel_d = su.calc_reliability(w_tmp, d_cols)
+                    app_rows.append({
+                        "技术模块": f"{d_nm}维度信度 ({len(d_cols)}题)",
+                        "核心统计指标": f"Cronbach's α = {rel_d['alpha']:.3f}",
+                        "质量判定": "内部一致性良好 (≥0.70)" if rel_d["alpha"] >= 0.70 else "建议复核题项同质性",
+                    })
+            else:
+                rel_all = su.calc_reliability(valid_df, caps["scale_cols"][:10])
+                app_rows.append({
+                    "技术模块": f"量表内部一致性 ({len(caps['scale_cols'][:10])}题)",
+                    "核心统计指标": f"Cronbach's α = {rel_all['alpha']:.3f}",
+                    "质量判定": "内部一致性良好 (≥0.70)" if rel_all["alpha"] >= 0.70 else "跨维度综合测量",
+                })
+        app_rows.extend([
+            {
+                "技术模块": "可编辑图表工程规范",
+                "核心统计指标": f"原生 XML 图表 + {len(svg_media_blobs)} 个矢量 SVG (svgBlip) + 全页 Markdown 备注表",
+                "质量判定": "支持 PowerPoint / Illustrator / Excel 二次编辑",
+            },
+            {
+                "技术模块": "方法局限声明",
+                "核心统计指标": demo_str,
+                "质量判定": "横断面相关性与回归分析揭示统计关联，不直接等价于因果推断",
+            },
+        ])
+        app_df = pd.DataFrame(app_rows)
+        _add_ppt_table(s_app, app_df, 0.55, 1.30, 12.23, 4.75, t, max_rows=6)
+        _add_conclusion_strip(s_app, t, "本报告所有图表源数据均已同步嵌入对应幻灯片备注栏（Notes Markdown）及 Word 数据附录。")
+        _write_slide_notes_markdown(s_app, "技术附录与方法声明", "数据质量与信效度汇总", app_df)
 
     # 保存基础 PPTX 并注入矢量 SVG 媒体包与 svgBlip 扩展
     raw_buf = io.BytesIO()

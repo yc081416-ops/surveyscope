@@ -126,21 +126,30 @@ def auto_detect_question_types(df: pd.DataFrame) -> dict:
             q_types[col] = "单选题"
             continue
 
-        # 优先检查字符串分隔的多选题
+        # 优先检查字符串分隔的多选题与开放文本题
         if s.dtype == object or pd.api.types.is_string_dtype(s):
             str_vals = s.astype(str).str.strip()
             str_vals = str_vals[~str_vals.isin(["", "nan", "None"])]
             if len(str_vals) == 0:
                 q_types[col] = "单选题"
                 continue
+            avg_len = str_vals.str.len().mean()
+            nunique_ratio = str_vals.nunique() / max(len(str_vals), 1)
+            has_sent_punct = str_vals.str.contains(r"[，。！？!?]", regex=True).mean()
+            is_open_kw = any(k in col_str for k in ["短评", "建议", "开放", "留言", "原因", "看法", "评论", "主观", "补充"])
+            if ("多选" not in col_str) and (
+                is_open_kw
+                or (has_sent_punct >= 0.25 and avg_len >= 8)
+                or (avg_len >= 18 and nunique_ratio > 0.5)
+            ):
+                q_types[col] = "开放文本题"
+                continue
             has_sep = str_vals.str.contains(r"[；;、]", regex=True).mean()
             if has_sep >= 0.15 or ("多选" in col_str and has_sep > 0):
                 q_types[col] = "多选题"
                 continue
             # 检查开放文本题（唯一值比例高或平均字数较长）
-            avg_len = str_vals.str.len().mean()
-            nunique_ratio = str_vals.nunique() / max(len(str_vals), 1)
-            if avg_len >= 10 or (avg_len >= 6 and nunique_ratio > 0.4) or any(k in col_str for k in ["短评", "建议", "开放", "留言", "原因", "看法"]):
+            if avg_len >= 10 or (avg_len >= 6 and nunique_ratio > 0.4):
                 q_types[col] = "开放文本题"
                 continue
             q_types[col] = "单选题"
@@ -255,7 +264,12 @@ def split_multiple_choice(series: pd.Series, sep_pattern: str = r"[；;、,]") -
 
 def detect_duplicate_responses(df: pd.DataFrame, cols: list = None) -> pd.Series:
     """重复作答识别：全部题目答案完全相同的受访者标记为 True。"""
-    target_cols = cols if cols else list(df.columns)
+    _meta = {"序号", "提交答卷时间", "所用时间", "来源", "来源详情", "来自IP", "IP", "答卷编号", "提交时间"}
+    if cols:
+        target_cols = [c for c in cols if c in df.columns]
+    else:
+        non_meta = [c for c in df.columns if str(c).strip() not in _meta]
+        target_cols = non_meta if non_meta else list(df.columns)
     if not target_cols or len(df) == 0:
         return pd.Series(False, index=df.index)
     return df[target_cols].duplicated(keep=False)
@@ -275,10 +289,14 @@ def detect_straightlining(df: pd.DataFrame, scale_cols: list) -> pd.Series:
 
 
 def detect_speeders(df: pd.DataFrame, duration_col: str, min_seconds: float = 60.0) -> pd.Series:
-    """答题时长筛查：答题时间低于设定秒数者标记为 True。"""
+    """答题时长筛查：答题时间低于设定秒数者标记为 True（兼容纯数字与问卷星「125秒」格式）。"""
     if not duration_col or duration_col not in df.columns:
         return pd.Series(False, index=df.index)
-    dur = pd.to_numeric(df[duration_col], errors="coerce")
+    raw_s = df[duration_col]
+    dur = pd.to_numeric(raw_s, errors="coerce")
+    if dur.notna().sum() == 0 and raw_s.notna().sum() > 0:
+        extracted = raw_s.astype(str).str.extract(r"(\d+(?:\.\d+)?)", expand=False)
+        dur = pd.to_numeric(extracted, errors="coerce")
     return dur < float(min_seconds)
 
 
@@ -293,11 +311,21 @@ def run_quality_control(
     min_seconds: float = 60.0,
     remove_flagged: bool = True,
 ) -> dict:
-    """综合执行数据质控，输出每条规则标记、汇总指标与质控后有效样本集。"""
+    """综合执行数据质控，输出每条规则标记、汇总指标、自动跳过原因与质控后有效样本集。"""
     total_n = len(df)
+    skipped_rules = []
+    valid_straight_cols = [c for c in (straight_cols or []) if c in df.columns]
+    has_straight = bool(check_straight and len(valid_straight_cols) >= 2)
+    if check_straight and len(valid_straight_cols) < 2:
+        skipped_rules.append("直线作答检测：当前数据集量表题不足 2 道，已自动跳过")
+
+    has_speed = bool(check_speed and duration_col and duration_col in df.columns)
+    if check_speed and (not duration_col or duration_col not in df.columns):
+        skipped_rules.append("作答过快检测：当前数据集不包含答题时长列，已自动跳过")
+
     dup_flag = detect_duplicate_responses(df, dup_cols) if check_dup else pd.Series(False, index=df.index)
-    straight_flag = detect_straightlining(df, straight_cols) if (check_straight and straight_cols) else pd.Series(False, index=df.index)
-    speed_flag = detect_speeders(df, duration_col, min_seconds) if (check_speed and duration_col) else pd.Series(False, index=df.index)
+    straight_flag = detect_straightlining(df, valid_straight_cols) if has_straight else pd.Series(False, index=df.index)
+    speed_flag = detect_speeders(df, duration_col, min_seconds) if has_speed else pd.Series(False, index=df.index)
 
     any_flag = dup_flag | straight_flag | speed_flag
     valid_df = df.loc[~any_flag].copy() if remove_flagged else df.copy()
@@ -317,10 +345,11 @@ def run_quality_control(
         "是否异常样本": any_flag,
     }, index=df.index)
 
+    skip_note = f"（注：{'；'.join(skipped_rules)}）" if skipped_rules else ""
     conclusion = (
         f"原始总样本量为 {total_n} 份，其中识别出重复作答 {dup_n} 份、直线作答 {straight_n} 份、"
         f"作答过快 {speed_n} 份（合计异常样本 {flagged_n} 份）；"
-        f"{'剔除后' if remove_flagged else '当前保留全部样本，'}有效样本量为 {valid_n} 份，问卷有效率为 {valid_rate:.1f}%。"
+        f"{'剔除后' if remove_flagged else '当前保留全部样本，'}有效样本量为 {valid_n} 份，问卷有效率为 {valid_rate:.1f}%。{skip_note}"
     )
 
     return {
@@ -331,6 +360,7 @@ def run_quality_control(
         "flagged_n": flagged_n,
         "valid_n": valid_n,
         "valid_rate": valid_rate,
+        "skipped_rules": skipped_rules,
         "flags_df": flags_df,
         "marked_df": flags_df,
         "valid_df": valid_df,
@@ -534,15 +564,24 @@ def analyze_numeric_question(series_or_list, weights: pd.Series = None) -> dict:
         f"中位数为 {median_val:.2f}（四分位距 Q1={q25_val:.2f}，Q3={q75_val:.2f}）。"
     )
     norm_p = float(stats.shapiro(vals[:5000])[1]) if n >= 3 else 1.0
+    se_val = std_val / np.sqrt(n) if n > 1 else 0.0
+    skew_val = float(stats.skew(vals, bias=False)) if n >= 3 and std_val > 0 else 0.0
+    kurt_val = float(stats.kurtosis(vals, bias=False)) if n >= 4 and std_val > 0 else 0.0
     return {
         "n": n,
         "n_valid": n,
         "mean": mean_val,
         "std": std_val,
+        "sd": std_val,
+        "se": se_val,
+        "ci_low": mean_val - 1.96 * se_val,
+        "ci_high": mean_val + 1.96 * se_val,
         "median": median_val,
         "q25": q25_val,
         "q75": q75_val,
         "iqr": round(q75_val - q25_val, 3),
+        "skew": skew_val,
+        "kurt": kurt_val,
         "normality_p": norm_p,
         "min": min_val,
         "max": max_val,
@@ -647,6 +686,9 @@ def analyze_nps_question(
         "promoter_cnt": p_cnt,
         "passive_cnt": neu_cnt,
         "detractor_cnt": d_cnt,
+        "promoters": int(round(p_cnt)),
+        "passives": int(round(neu_cnt)),
+        "detractors": int(round(d_cnt)),
         "total": total,
         "table": table,
         "conclusion": conclusion,
@@ -1151,6 +1193,7 @@ def calc_validity_efa(df: pd.DataFrame, cols: list, n_factors: int = None, loadi
         "eigen_table": eigen_table,
         "raw_loadings_df": raw_loadings_df,
         "masked_loadings_df": masked_loadings_df,
+        "loadings_df": masked_loadings_df,
         "cum_var_pct": round(cum_pct, 2),
         "n_factors": n_factors,
         "scores_df": scores_df,
@@ -1524,9 +1567,11 @@ DEFAULT_STOPWORDS = {
 }
 
 
-def analyze_open_text(series: pd.Series, stopwords: set = None, top_n: int = 30) -> dict:
+def analyze_open_text(series: pd.Series, stopwords: set = None, top_n: int = 30, extra_stopwords: set = None) -> dict:
     """用 jieba 分词，过滤停用词与标点符号，输出前 30 词频表与词频字典。"""
     stop_set = set(DEFAULT_STOPWORDS) if stopwords is None else set(stopwords)
+    if extra_stopwords:
+        stop_set = stop_set | set(extra_stopwords)
     clean_s = series.dropna().astype(str).str.strip()
     clean_s = clean_s[~clean_s.isin(["", "nan", "None"])]
 
@@ -1769,13 +1814,12 @@ COMMENT_TEMPLATES_20 = [
 ]
 
 
-def generate_demo_coffee_data(seed: int = 42, n: int = 300) -> pd.DataFrame:
+def generate_demo_coffee_data(seed: int = 42, n: int = 300, include_extended: bool = False) -> pd.DataFrame:
     """
-    模块十二演示模式（2026-10-31 按真实市调口径重做）：
+    内部基准测试数据生成器（仅供 self_check.py 自检使用，禁止在 app.py 生产前端调用）：
     以三个潜在消费分群（品质型 / 性价比型 / 便利型）为生成骨架，驱动品牌选择、
-    月消费额、量表、NPS、漏斗与开放题情感，指标落在真实市调常见区间
-    （NPS 约 +20~+30、量表 α 约 0.85~0.92、PSM 最优价格点约 20 元）；
-    固定随机种子 seed=42 生成 n 份问卷，故意混入约 5% 直线/过快作答供质控演示。
+    月消费额、量表、NPS、漏斗与开放题情感，固定随机种子 seed=42 生成 n 份问卷。
+    当 include_extended=True 时，额外附加「省份」、成对 KANO 正反向列及联合分析正交轮廓列供 S3–S8 测试。
     """
     rng = np.random.default_rng(seed)
 
@@ -1972,6 +2016,50 @@ def generate_demo_coffee_data(seed: int = 42, n: int = 300) -> pd.DataFrame:
         "价格敏感_太贵": psm_too_expensive,
         "开放题短评": comments,
     })
+
+    if include_extended:
+        rng_ext = np.random.default_rng(seed + 1000)
+        # 1) 省份列（供 self_check S4/S5/S7/S8 测试真实列区域地图渲染）
+        prov_names = ["安徽", "江苏", "上海", "浙江", "湖北", "广东", "北京", "四川", "山东", "河南"]
+        prov_probs = np.array([86, 64, 41, 38, 22, 18, 12, 9, 6, 4], dtype=float)
+        prov_probs = prov_probs / prov_probs.sum()
+        df["省份"] = rng_ext.choice(prov_names, size=n, p=prov_probs)
+
+        # 2) 成对 KANO 正向/反向评价列（1=喜欢, 2=理应如此, 3=无所谓, 4=勉强接受, 5=不喜欢）
+        kano_specs = [
+            ("季节限定新品", [0.54, 0.18, 0.00, 0.28]),  # A, O, M, I
+            ("出餐≤5分钟",   [0.18, 0.50, 0.10, 0.22]),
+            ("价格透明",     [0.09, 0.46, 0.26, 0.19]),
+            ("现磨现做",     [0.05, 0.37, 0.41, 0.17]),
+            ("外卖包装防洒", [0.15, 0.33, 0.22, 0.30]),
+            ("会员积分",     [0.20, 0.15, 0.10, 0.55]),
+            ("杯型可选",     [0.16, 0.14, 0.08, 0.62]),
+        ]
+        pair_for_code = {"A": (1, 2), "O": (1, 5), "M": (2, 5), "I": (3, 3)}
+        for feat_nm, probs in kano_specs:
+            chosen_codes = rng_ext.choice(["A", "O", "M", "I"], size=n, p=probs)
+            df[f"KANO正向_{feat_nm}"] = [pair_for_code[c][0] for c in chosen_codes]
+            df[f"KANO反向_{feat_nm}"] = [pair_for_code[c][1] for c in chosen_codes]
+
+        # 3) 联合分析属性水平列与总体意愿评分列（供 S3/S4/S5 OLS 效用回归测试）
+        u_price = {"9元": 0.82, "13元": 0.31, "17元": -0.28, "21元": -0.85}
+        u_flavor = {"生椰拿铁": 0.60, "经典拿铁": 0.20, "美式": -0.20, "手冲单品": -0.60}
+        u_brand = {"瑞幸": 0.35, "库迪": 0.12, "星巴克": -0.01, "Manner": -0.46}
+        u_cup = {"大杯473ml": 0.34, "中杯355ml": 0.00, "小杯237ml": -0.34}
+        c_p = rng_ext.choice(list(u_price.keys()), size=n)
+        c_f = rng_ext.choice(list(u_flavor.keys()), size=n)
+        c_b = rng_ext.choice(list(u_brand.keys()), size=n)
+        c_c = rng_ext.choice(list(u_cup.keys()), size=n)
+        c_score = [
+            round(5.0 + u_price[p] + u_flavor[f] + u_brand[b] + u_cup[c] + float(rng_ext.normal(0, 0.08)), 3)
+            for p, f, b, c in zip(c_p, c_f, c_b, c_c)
+        ]
+        df["联合属性_价格"] = c_p
+        df["联合属性_口味类型"] = c_f
+        df["联合属性_品牌"] = c_b
+        df["联合属性_杯型容量"] = c_c
+        df["联合评分_购买意愿"] = c_score
+
     return df
 
 
@@ -2254,50 +2342,588 @@ def calc_van_westendorp(df: pd.DataFrame, tc_col: str, c_col: str, e_col: str, t
 
 
 # ==============================================================================
-# 模块十四：扩展高阶统计与市调模型（S1–S3、文本网络与情感、树模型、区域分布）
+# 模块十四：自适应数据能力探测矩阵与扩展高阶市调模型（纯实测数据驱动，零合成回退）
 # ==============================================================================
+
+CHINA_PROVINCES_SHORT = (
+    "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
+    "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南",
+    "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州",
+    "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆", "台湾",
+    "香港", "澳门",
+)
+
+
+def _normalize_province_name(val) -> str:
+    """将省份全称或带地市前缀的字符串归一化为标准省份简称（如「安徽省」->「安徽」）。"""
+    if pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if not s or s in ("nan", "None", "NULL"):
+        return ""
+    for p in CHINA_PROVINCES_SHORT:
+        if s == p or s.startswith(p):
+            return p
+    for suf in ("维吾尔自治区", "壮族自治区", "回族自治区", "特别行政区", "自治区", "省", "市"):
+        if s.endswith(suf) and len(s) > len(suf):
+            cand = s[: -len(suf)]
+            if cand in CHINA_PROVINCES_SHORT:
+                return cand
+    return ""
+
+
+def detect_province_column(df: pd.DataFrame) -> str:
+    """自动检测数据集中能匹配中国省份名称的地域列；若不存在则返回 None。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    priority_cols = [
+        c for c in df.columns
+        if any(k in str(c).lower() for k in ("省", "区域", "地区", "地域", "所在地", "籍贯", "province", "region"))
+    ]
+    other_cols = [c for c in df.columns if c not in priority_cols]
+    for col in priority_cols + other_cols:
+        s = df[col].dropna().astype(str).str.strip()
+        s = s[~s.isin(["", "nan", "None"])]
+        if len(s) < 2:
+            continue
+        mapped = s.map(_normalize_province_name)
+        valid_mapped = mapped[mapped != ""]
+        if len(valid_mapped) / len(s) >= 0.50 and valid_mapped.nunique() >= 2:
+            return col
+    return None
+
+
+def detect_duration_column(df: pd.DataFrame) -> str:
+    """检测问卷作答时长列（兼容「答题时长（秒）」与问卷星「所用时间」等列名）。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    for col in df.columns:
+        cs = str(col).strip()
+        if any(k in cs for k in ("答题时长", "所用时间", "作答时长", "用时", "duration")):
+            raw_s = df[col].dropna()
+            if len(raw_s) == 0:
+                continue
+            num_s = pd.to_numeric(raw_s, errors="coerce")
+            if num_s.notna().sum() >= max(1, int(len(raw_s) * 0.5)):
+                return col
+            ext_s = pd.to_numeric(raw_s.astype(str).str.extract(r"(\d+(?:\.\d+)?)", expand=False), errors="coerce")
+            if ext_s.notna().sum() >= max(1, int(len(raw_s) * 0.5)):
+                return col
+    return None
+
+
+def detect_funnel_columns(df: pd.DataFrame) -> dict:
+    """检测可排序的品牌/业务转化漏斗二值列（至少 3 个递进环节）。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"enabled": False, "cols": [], "stage_names": []}
+
+    stage_patterns = [
+        ("知名", ("知名", "知晓", "听说", "认知", "触达", "曝光", "aware")),
+        ("考虑", ("考虑", "兴趣", "意向", "加购", "收藏", "consider")),
+        ("购买", ("购买", "尝试", "下单", "转化", "付费", "使用", "purchase", "buy")),
+        ("复购", ("复购", "重购", "留存", "忠诚", "续费", "推荐", "repurchase", "loyal")),
+    ]
+    valid_vals = {0, 1, "0", "1", True, False, "是", "否", "Yes", "No", "yes", "no"}
+
+    def _is_binary_col(c):
+        s = df[c].dropna()
+        if len(s) < 3:
+            return False
+        uniq = set(s.unique()) | set(s.astype(str).str.strip().unique())
+        num_s = pd.to_numeric(s, errors="coerce").dropna()
+        if len(num_s) == len(s) and set(num_s.unique()).issubset({0, 1, 0.0, 1.0}):
+            return True
+        return set(s.astype(str).str.strip().unique()).issubset({str(v) for v in valid_vals})
+
+    matched_cols = []
+    matched_names = []
+    for stage_label, kws in stage_patterns:
+        for col in df.columns:
+            if col in matched_cols:
+                continue
+            cs = str(col).lower()
+            if any(k in cs for k in kws) and _is_binary_col(col):
+                matched_cols.append(col)
+                matched_names.append(str(col))
+                break
+
+    if len(matched_cols) >= 3:
+        return {"enabled": True, "cols": matched_cols, "stage_names": matched_names}
+    return {"enabled": False, "cols": [], "stage_names": []}
+
+
+def detect_psm_columns(df: pd.DataFrame) -> dict:
+    """检测 Van Westendorp PSM 四条价格阈值列（太便宜 / 便宜 / 贵 / 太贵）。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"enabled": False, "cols": {}}
+
+    tc_col = c_col = e_col = te_col = None
+    for col in df.columns:
+        cs = str(col).lower()
+        num_ok = pd.to_numeric(df[col], errors="coerce").notna().sum() >= 5
+        if not num_ok:
+            continue
+        if tc_col is None and any(k in cs for k in ("太便宜", "过低", "too_cheap", "toocheap")):
+            tc_col = col
+        elif te_col is None and any(k in cs for k in ("太贵", "过高", "too_expensive", "tooexpensive")):
+            te_col = col
+
+    for col in df.columns:
+        if col in (tc_col, te_col):
+            continue
+        cs = str(col).lower()
+        num_ok = pd.to_numeric(df[col], errors="coerce").notna().sum() >= 5
+        if not num_ok:
+            continue
+        if c_col is None and any(k in cs for k in ("便宜", "较便宜", "划算", "cheap")) and "太" not in cs:
+            c_col = col
+        elif e_col is None and any(k in cs for k in ("贵", "偏贵", "较贵", "expensive")) and "太" not in cs:
+            e_col = col
+
+    if tc_col and c_col and e_col and te_col:
+        return {
+            "enabled": True,
+            "cols": {
+                "tc_col": tc_col,
+                "c_col": c_col,
+                "e_col": e_col,
+                "te_col": te_col,
+                "too_cheap": tc_col,
+                "cheap": c_col,
+                "expensive": e_col,
+                "too_expensive": te_col,
+            },
+        }
+    return {"enabled": False, "cols": {}}
+
+
+def detect_kano_columns(df: pd.DataFrame) -> dict:
+    """检测 KANO 模型成对的正向（具备）与反向（不具备）题项列（至少 2 对）。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"enabled": False, "pos_cols": [], "neg_cols": [], "feature_names": []}
+
+    pos_map = {}
+    neg_map = {}
+    prefix_pairs = [
+        ("KANO正向_", "KANO反向_"),
+        ("kano正向_", "kano反向_"),
+        ("正向_", "反向_"),
+        ("具备_", "不具备_"),
+    ]
+    suffix_pairs = [
+        ("_正向", "_反向"),
+        ("_具备", "_不具备"),
+    ]
+
+    for col in df.columns:
+        cs = str(col).strip()
+        num_s = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(num_s) < 5 or num_s.min() < 1 or num_s.max() > 7:
+            continue
+        matched = False
+        for p_pre, n_pre in prefix_pairs:
+            if cs.startswith(p_pre):
+                pos_map[cs[len(p_pre):]] = col
+                matched = True
+                break
+            if cs.startswith(n_pre):
+                neg_map[cs[len(n_pre):]] = col
+                matched = True
+                break
+        if not matched:
+            for p_suf, n_suf in suffix_pairs:
+                if cs.endswith(p_suf):
+                    pos_map[cs[:-len(p_suf)]] = col
+                    break
+                if cs.endswith(n_suf):
+                    neg_map[cs[:-len(n_suf)]] = col
+                    break
+
+    common_feats = [f for f in pos_map.keys() if f in neg_map]
+    if len(common_feats) >= 2:
+        return {
+            "enabled": True,
+            "pos_cols": [pos_map[f] for f in common_feats],
+            "neg_cols": [neg_map[f] for f in common_feats],
+            "feature_names": common_feats,
+        }
+    return {"enabled": False, "pos_cols": [], "neg_cols": [], "feature_names": []}
+
+
+def detect_conjoint_columns(df: pd.DataFrame) -> dict:
+    """检测联合分析（Conjoint）轮廓属性列与总体意愿评分列。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"enabled": False, "attr_cols": [], "rating_col": None}
+
+    attr_cols = []
+    rating_col = None
+    for col in df.columns:
+        cs = str(col).strip()
+        cs_low = cs.lower()
+        if any(cs.startswith(p) for p in ("联合属性_", "轮廓属性_", "conjoint_attr_")):
+            if df[col].dropna().nunique() >= 2:
+                attr_cols.append(col)
+        elif rating_col is None and any(k in cs_low for k in ("联合评分", "轮廓评分", "conjoint_rating", "conjoint_score")):
+            if pd.to_numeric(df[col], errors="coerce").notna().sum() >= 8:
+                rating_col = col
+
+    if len(attr_cols) >= 2 and rating_col is not None:
+        return {"enabled": True, "attr_cols": attr_cols, "rating_col": rating_col}
+    return {"enabled": False, "attr_cols": [], "rating_col": None}
+
+
+def detect_ipa_columns(df: pd.DataFrame, scale_cols: list = None) -> dict:
+    """检测成对的「重要性 × 满意度」列（如 重要性1_口味口感 <-> 满意度1_口味口感）。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"enabled": False, "auto_paired": False, "imp_cols": [], "sat_cols": [], "attr_names": []}
+
+    imp_map = {}
+    sat_map = {}
+    for col in df.columns:
+        cs = str(col).strip()
+        num_s = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(num_s) < 3:
+            continue
+        m_imp = re.match(r"^(?:重要性|重要度)\d*[_:：\-]?(.*)$", cs)
+        m_sat = re.match(r"^(?:满意度|满意)\d*[_:：\-]?(.*)$", cs)
+        if m_imp and m_imp.group(1):
+            imp_map[m_imp.group(1).strip()] = col
+        elif m_sat and m_sat.group(1):
+            sat_map[m_sat.group(1).strip()] = col
+
+    common = [k for k in imp_map.keys() if k in sat_map]
+    if len(common) >= 2:
+        return {
+            "enabled": True,
+            "auto_paired": True,
+            "imp_cols": [imp_map[k] for k in common],
+            "sat_cols": [sat_map[k] for k in common],
+            "attr_names": common,
+        }
+    return {"enabled": False, "auto_paired": False, "imp_cols": [], "sat_cols": [], "attr_names": []}
+
+
+def detect_brand_switching_columns(df: pd.DataFrame) -> dict:
+    """检测成对的品牌/选项前期→当期流转列（如 上次购买品牌 -> 最常购买品牌）。"""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"enabled": False, "prev_col": None, "curr_col": None}
+
+    prev_cands = [c for c in df.columns if any(k in str(c) for k in ("上次", "上期", "过去", "首次", "之前", "原品牌"))]
+    curr_cands = [c for c in df.columns if any(k in str(c) for k in ("最常", "本期", "现在", "目前", "当前", "现品牌"))]
+    for pc in prev_cands:
+        for cc in curr_cands:
+            if pc != cc and df[pc].dropna().nunique() >= 2 and df[cc].dropna().nunique() >= 2:
+                return {"enabled": True, "prev_col": pc, "curr_col": cc}
+    return {"enabled": False, "prev_col": None, "curr_col": None}
+
+
+def detect_scale_dimensions(df: pd.DataFrame, scale_cols: list = None) -> dict:
+    """
+    自动将量表题按题干前缀聚类为潜变量测量维度（排除 KANO 正反向列）：
+    例如「价格量表1_价格合理」「价格量表2_性价比高」归入「价格量表」维度。
+    返回 {维度名: [列名列表]}（仅保留题项数 >= 2 的维度）。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    if scale_cols is None:
+        qt = auto_detect_question_types(df)
+        scale_cols = [c for c, t in qt.items() if t == "量表题"]
+
+    groups = {}
+    for col in scale_cols:
+        cs = str(col).strip()
+        if cs.startswith(("KANO正向_", "KANO反向_", "kano正向_", "kano反向_")):
+            continue
+        # 提取下划线/冒号/数字编号前的维度词根
+        m = re.match(r"^([^\d_:：\-]+?)\d*[_:：\-].+$", cs)
+        if m:
+            prefix = m.group(1).strip()
+        else:
+            m2 = re.match(r"^([^\d]+)\d+$", cs)
+            prefix = m2.group(1).strip() if m2 else "综合量表"
+        groups.setdefault(prefix, []).append(col)
+
+    valid_dims = {k: v for k, v in groups.items() if len(v) >= 2}
+    if not valid_dims and len(scale_cols) >= 2:
+        non_kano = [c for c in scale_cols if not str(c).startswith(("KANO正向_", "KANO反向_"))]
+        if len(non_kano) >= 2:
+            valid_dims["综合量表"] = non_kano
+    return valid_dims
+
+
+def detect_dataset_capabilities(df: pd.DataFrame, qtypes: dict = None) -> dict:
+    """
+    核心自适应探测引擎：扫描当前上传数据集的真实列结构，输出题型分组与各高级模型可用性矩阵。
+    严格对应《06-产品化改造要求》2.4 能力可用性矩阵，不满足条件的能力一律返回 enabled=False。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"has_data": False}
+
+    qt = qtypes if isinstance(qtypes, dict) else auto_detect_question_types(df)
+    duration_col = detect_duration_column(df)
+    kano_info = detect_kano_columns(df)
+    kano_col_set = set(kano_info["pos_cols"] + kano_info["neg_cols"])
+    conjoint_info = detect_conjoint_columns(df)
+    conjoint_col_set = set(conjoint_info["attr_cols"] + ([conjoint_info["rating_col"]] if conjoint_info["rating_col"] else []))
+
+    single_cols = [c for c, t in qt.items() if t == "单选题" and c not in conjoint_col_set]
+    multi_cols = [c for c, t in qt.items() if t == "多选题"]
+    scale_cols = [c for c, t in qt.items() if t == "量表题" and c not in kano_col_set]
+    numeric_cols = [c for c, t in qt.items() if t == "数值题" and c != duration_col and c not in conjoint_col_set]
+    nps_cols = [c for c, t in qt.items() if t == "NPS题"]
+    text_cols = [c for c, t in qt.items() if t == "开放文本题"]
+    meta_cols = [c for c, t in qt.items() if t == "元信息"]
+
+    scale_dims = detect_scale_dimensions(df, scale_cols)
+    non_imp_dims = {k: v for k, v in scale_dims.items() if not k.startswith(("重要性", "重要度"))}
+    prov_col = detect_province_column(df)
+    funnel_info = detect_funnel_columns(df)
+    psm_info = detect_psm_columns(df)
+    ipa_info = detect_ipa_columns(df, scale_cols)
+    switch_info = detect_brand_switching_columns(df)
+
+    # 对应分析：>=2 道分类/多选题且有效类别数 >= 3
+    ca_cands = []
+    for c in single_cols:
+        if df[c].dropna().nunique() >= 3:
+            ca_cands.append(c)
+    for c in multi_cols:
+        mc_res = split_multiple_choice(df[c])
+        if len(mc_res["counts"]) >= 3:
+            ca_cands.append(c)
+    ca_enabled = len(ca_cands) >= 2
+
+    # 聚类画像：>=3 道数值/量表/NPS题 且有效样本 >= 10
+    cluster_cands = scale_cols + numeric_cols + nps_cols
+    cluster_enabled = (len(cluster_cands) >= 3) and (len(df) >= 10)
+
+    # SEM 路径模型：>=2 个量表维度（每维度 >=2 题）且存在目标结果列
+    sem_dims = non_imp_dims if len(non_imp_dims) >= 2 else scale_dims
+    sem_targets = nps_cols + numeric_cols + [c for c in scale_cols if c not in sum(list(sem_dims.values())[:2], [])]
+    sem_enabled = (len(sem_dims) >= 2) and (len(sem_targets) >= 1) and (len(df) >= 12)
+
+    # 加权可用列：类别数在 2~10 之间的单选题（优先人口学列）
+    demo_kws = ("性别", "年龄", "城市", "地区", "区域", "省份", "学历", "教育", "职业", "收入", "年级", "身份")
+    weight_cols = [
+        c for c in single_cols
+        if 2 <= df[c].dropna().nunique() <= 10
+    ]
+    weight_cols_sorted = sorted(weight_cols, key=lambda c: (0 if any(k in str(c) for k in demo_kws) else 1))
+
+    # 文本有效条数统计
+    text_counts = {}
+    for tc in text_cols:
+        s_txt = df[tc].dropna().astype(str).str.strip()
+        s_txt = s_txt[~s_txt.isin(["", "nan", "None", "无", "没有", "略"])]
+        text_counts[tc] = int(len(s_txt))
+
+    special_models = {
+        "correspondence": {
+            "enabled": ca_enabled,
+            "name": "对应分析 (CA)",
+            "requirement": "至少 2 道分类题/多选题（每题有效选项 ≥ 3 个）",
+            "status_reason": f"已匹配 {len(ca_cands)} 道多类别题目" if ca_enabled else "缺少至少 2 道含 3 个以上选项的分类/多选题",
+            "cols": ca_cands,
+        },
+        "ipa": {
+            "enabled": ipa_info["enabled"],
+            "name": "IPA 重要性-满意度四象限",
+            "requirement": "成对「重要性 × 满意度」量表题项（≥ 2 对）",
+            "status_reason": f"已识别 {len(ipa_info['attr_names'])} 对重要性×满意度要素" if ipa_info["enabled"] else "未检测到成对「重要性_X / 满意度_X」量表列",
+            "info": ipa_info,
+        },
+        "funnel": {
+            "enabled": funnel_info["enabled"],
+            "name": "品牌转化漏斗",
+            "requirement": "至少 3 个递进转化阶段的二值列（知名/考虑/购买/复购等）",
+            "status_reason": f"已识别 {len(funnel_info['cols'])} 级转化漏斗列" if funnel_info["enabled"] else "未检测到可排序的漏斗阶段 0/1 二值列",
+            "cols": funnel_info["cols"],
+            "info": funnel_info,
+        },
+        "brand_switching": {
+            "enabled": switch_info["enabled"],
+            "name": "品牌转换与留存桑基图",
+            "requirement": "成对前期与当期品牌/偏好单选列（如上次购买 vs 最常购买）",
+            "status_reason": f"已匹配「{switch_info['prev_col']} → {switch_info['curr_col']}」" if switch_info["enabled"] else "未检测到前期/当期成对转换列",
+            "cols": [switch_info["prev_col"], switch_info["curr_col"]] if switch_info["enabled"] else [],
+            "info": switch_info,
+        },
+        "psm": {
+            "enabled": psm_info["enabled"],
+            "name": "PSM 价格敏感度模型",
+            "requirement": "4 道 Van Westendorp 价格阈值数值列（太便宜/便宜/贵/太贵）",
+            "status_reason": "已完整识别 4 道价格敏感度阈值列" if psm_info["enabled"] else "未检测到完整的太便宜/便宜/贵/太贵 4 道价格列",
+            "cols": psm_info["cols"],
+            "info": psm_info,
+        },
+        "kano": {
+            "enabled": kano_info["enabled"],
+            "name": "KANO 需求分层模型",
+            "requirement": "成对正向（具备）与反向（不具备）5 级评价列（≥ 2 对）",
+            "status_reason": f"已识别 {len(kano_info['feature_names'])} 对 KANO 正反向题项" if kano_info["enabled"] else "未检测到成对的正向/反向功能评价列",
+            "cols": kano_info["pos_cols"] + kano_info["neg_cols"],
+            "info": kano_info,
+        },
+        "conjoint": {
+            "enabled": conjoint_info["enabled"],
+            "name": "联合分析 (Conjoint)",
+            "requirement": "产品轮廓属性列（≥ 2 个属性）+ 总体购买意愿/效用评分列",
+            "status_reason": f"已识别 {len(conjoint_info['attr_cols'])} 个轮廓属性与评分列" if conjoint_info["enabled"] else "未检测到正交轮廓属性列与对应评分列",
+            "cols": conjoint_info,
+            "info": conjoint_info,
+        },
+        "sem": {
+            "enabled": sem_enabled,
+            "name": "结构方程路径模型 (SEM)",
+            "requirement": "至少 2 个量表测量维度（每维度 ≥ 2 题）+ 1 个结果变量列",
+            "status_reason": f"已识别 {len(sem_dims)} 个量表潜变量维度" if sem_enabled else "量表测量维度不足 2 个或缺少结果变量列",
+            "dims": sem_dims,
+            "targets": sem_targets,
+        },
+        "clustering": {
+            "enabled": cluster_enabled,
+            "name": "消费者聚类画像 (K-Means)",
+            "requirement": "至少 3 道数值题/量表题且有效样本 n ≥ 10",
+            "status_reason": f"可用连续/量表特征共 {len(cluster_cands)} 列" if cluster_enabled else "数值题与量表题合计不足 3 列或样本过少",
+            "cols": cluster_cands,
+        },
+        "region_map": {
+            "enabled": prov_col is not None,
+            "name": "区域分布地图",
+            "requirement": "包含中国省份/直辖市/自治区名称的地域列",
+            "status_reason": f"已识别省份列「{prov_col}」" if prov_col else "数据中不含可匹配中国省份名称的列",
+            "col": prov_col,
+        },
+    }
+
+    # 补充简写键名别名，供报告导出与前端统一读取（展示列表枚举时使用 canonical_special_keys）
+    canonical_special_keys = [
+        "region_map", "funnel", "psm", "kano", "conjoint",
+        "sem", "correspondence", "clustering", "ipa", "brand_switching",
+    ]
+    special_models["map"] = special_models["region_map"]
+    special_models["sankey"] = special_models["brand_switching"]
+    special_models["ca"] = special_models["correspondence"]
+
+    quant_all = scale_cols + numeric_cols + nps_cols
+    analysis_cols = single_cols + multi_cols + scale_cols + numeric_cols + nps_cols + text_cols
+    cross_cat_cat = len(single_cols) >= 2
+    cross_cat_num = (len(single_cols) >= 1) and (len(quant_all) >= 1)
+    cross_num_num = len(quant_all) >= 2
+
+    modules = {
+        "overview": True,
+        "qc": True,
+        "single_analysis": len(analysis_cols) > 0,
+        "single_question": len(analysis_cols) > 0,
+        "cross_analysis": len(single_cols + multi_cols + quant_all) >= 2,
+        "crosstab": len(single_cols + multi_cols + quant_all) >= 2,
+        "scale_modeling": (len(scale_cols) >= 2) or (len(quant_all) >= 2),
+        "special_models": any(special_models[k]["enabled"] for k in canonical_special_keys),
+        "text_analysis": len(text_cols) >= 1,
+        "weighting": len(weight_cols_sorted) >= 1,
+        "export": True,
+    }
+
+    return {
+        "has_data": True,
+        "qtypes": qt,
+        "analysis_cols": analysis_cols,
+        "single_cols": single_cols,
+        "multi_cols": multi_cols,
+        "scale_cols": scale_cols,
+        "numeric_cols": numeric_cols,
+        "nps_cols": nps_cols,
+        "text_cols": text_cols,
+        "meta_cols": meta_cols,
+        "duration_col": duration_col,
+        "scale_dimensions": scale_dims,
+        "scale_dims": scale_dims,
+        "weight_cols": weight_cols_sorted,
+        "text_valid_counts": text_counts,
+        "cross_cat_cat": cross_cat_cat,
+        "cross_cat_num": cross_cat_num,
+        "cross_num_num": cross_num_num,
+        "canonical_special_keys": canonical_special_keys,
+        "modules": modules,
+        "special_models": special_models,
+    }
+
 
 def calc_sem_path_model(
     df: pd.DataFrame,
     price_cols: list = None,
     qual_cols: list = None,
-    target_col: str = "NPS推荐度",
+    target_col: str = None,
+    dim1_name: str = None,
+    dim2_name: str = None,
+    dim1_cols: list = None,
+    dim2_cols: list = None,
 ) -> dict:
     """
     S1 结构方程路径模型（基于标准化变量 OLS 路径估计）：
-    外生潜变量「价格感知」与「品质感知」指向内生变量「推荐意愿 (NPS)」。
+    支持任意两个外生潜变量测量维度指向结果变量的路径估计；
     路径系数 β 与对标准化后的合成变量执行多元线性回归 (run_linear_regression) 的回归系数完全一致。
     """
     work_df = df.copy()
-    if price_cols is None:
-        price_cols = ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引"]
-    if qual_cols is None:
-        if "品质量表3_正向" not in work_df.columns and "品质量表3_品质不稳定_反向" in work_df.columns:
-            work_df["品质量表3_正向"] = reverse_score(work_df["品质量表3_品质不稳定_反向"], max_scale=5)
-        qual_cols = ["品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"]
+    price_cols = dim1_cols or price_cols
+    qual_cols = dim2_cols or qual_cols
+    default_p = ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引"]
+    default_q_check = ["品质量表1_口感醇厚", "品质量表2_豆源优质"]
 
-    work_df["_price_raw"] = compute_scale_composite(work_df, price_cols)
-    work_df["_qual_raw"] = compute_scale_composite(work_df, qual_cols)
+    if price_cols is None and qual_cols is None:
+        if all(c in work_df.columns for c in default_p + default_q_check):
+            price_cols = default_p
+            if "品质量表3_正向" not in work_df.columns and "品质量表3_品质不稳定_反向" in work_df.columns:
+                work_df["品质量表3_正向"] = reverse_score(work_df["品质量表3_品质不稳定_反向"], max_scale=5)
+            qual_cols = ["品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"]
+            qual_cols = [c for c in qual_cols if c in work_df.columns]
+            dim1_name = dim1_name or "价格感知"
+            dim2_name = dim2_name or "品质感知"
+            target_col = target_col or ("NPS推荐度" if "NPS推荐度" in work_df.columns else None)
+        else:
+            dims = detect_scale_dimensions(work_df)
+            non_imp = {k: v for k, v in dims.items() if not k.startswith(("重要性", "重要度"))}
+            use_dims = non_imp if len(non_imp) >= 2 else dims
+            if len(use_dims) < 2:
+                raise ValueError("当前数据集量表维度不足 2 个（每维度需 ≥ 2 题），无法拟合结构方程路径模型。")
+            dim_keys = list(use_dims.keys())[:2]
+            dim1_name = dim1_name or dim_keys[0]
+            dim2_name = dim2_name or dim_keys[1]
+            price_cols = use_dims[dim_keys[0]]
+            qual_cols = use_dims[dim_keys[1]]
+
+    dim1_name = dim1_name or "价格感知"
+    dim2_name = dim2_name or "品质感知"
+    if target_col is None or target_col not in work_df.columns:
+        qt = auto_detect_question_types(work_df)
+        used_set = set(price_cols + qual_cols)
+        cands = [c for c, t in qt.items() if t in ("NPS题", "数值题", "量表题") and c not in used_set]
+        if not cands:
+            raise ValueError("当前数据集缺少可用于结构方程路径模型的内生结果变量列。")
+        target_col = cands[0]
+
+    work_df["_dim1_raw"] = compute_scale_composite(work_df, price_cols)
+    work_df["_dim2_raw"] = compute_scale_composite(work_df, qual_cols)
     work_df["_target_raw"] = pd.to_numeric(work_df[target_col], errors="coerce")
 
-    sub = work_df[["_price_raw", "_qual_raw", "_target_raw"] + price_cols + qual_cols].dropna().copy()
+    sub = work_df[["_dim1_raw", "_dim2_raw", "_target_raw"] + price_cols + qual_cols].dropna().copy()
     n_valid = len(sub)
     if n_valid < 10:
         raise ValueError("有效样本量不足 10 份，无法估计结构方程路径模型。")
 
     # 标准化合成变量 (Z-score, ddof=1)
     std_df = pd.DataFrame(index=sub.index)
-    for raw_c, std_c in [("_price_raw", "价格感知"), ("_qual_raw", "品质感知"), ("_target_raw", target_col)]:
+    for raw_c, std_c in [("_dim1_raw", dim1_name), ("_dim2_raw", dim2_name), ("_target_raw", target_col)]:
         s = sub[raw_c].astype(float)
         sd = float(s.std(ddof=1))
         std_df[std_c] = (s - float(s.mean())) / (sd if sd > 0 else 1.0)
 
-    # 直接调用 run_linear_regression 确保与多元线性回归标准化系数分毫不差
-    ols_res = run_linear_regression(std_df, target_col, ["价格感知", "品质感知"])
+    ols_res = run_linear_regression(std_df, target_col, [dim1_name, dim2_name])
     coef_df = ols_res["coef_table"]
 
-    row_price = coef_df[coef_df["变量"] == "价格感知"].iloc[0]
-    row_qual = coef_df[coef_df["变量"] == "品质感知"].iloc[0]
+    row_price = coef_df[coef_df["变量"] == dim1_name].iloc[0]
+    row_qual = coef_df[coef_df["变量"] == dim2_name].iloc[0]
 
     beta_price = float(row_price["回归系数(B)"])
     se_price = float(row_price["标准误(SE)"])
@@ -2309,7 +2935,7 @@ def calc_sem_path_model(
     t_qual = float(row_qual["t值"])
     p_qual = float(row_qual["p值"])
 
-    r_exo, p_exo = stats.pearsonr(std_df["价格感知"], std_df["品质感知"])
+    r_exo, p_exo = stats.pearsonr(std_df[dim1_name], std_df[dim2_name])
     r_exo = float(r_exo)
     p_exo = float(p_exo)
 
@@ -2324,8 +2950,8 @@ def calc_sem_path_model(
 
     path_table = pd.DataFrame([
         {
-            "路径关系": f"价格感知 → {target_col}",
-            "外生变量": "价格感知",
+            "路径关系": f"{dim1_name} → {target_col}",
+            "外生变量": dim1_name,
             "内生变量": target_col,
             "标准化路径系数(β)": beta_price,
             "标准误(SE)": se_price,
@@ -2334,8 +2960,8 @@ def calc_sem_path_model(
             "显著性": _sig_stars(p_price),
         },
         {
-            "路径关系": f"品质感知 → {target_col}",
-            "外生变量": "品质感知",
+            "路径关系": f"{dim2_name} → {target_col}",
+            "外生变量": dim2_name,
             "内生变量": target_col,
             "标准化路径系数(β)": beta_qual,
             "标准误(SE)": se_qual,
@@ -2345,23 +2971,25 @@ def calc_sem_path_model(
         },
     ])
 
-    # 测量模型外载荷（各题项与所属潜变量合成得分的相关系数）
     loading_rows = []
     for c in price_cols:
-        r_load = float(np.corrcoef(sub[c].astype(float), sub["_price_raw"].astype(float))[0, 1])
-        loading_rows.append({"潜变量": "价格感知", "测量题项": c, "标准化载荷": round(r_load, 3)})
+        r_load = float(np.corrcoef(sub[c].astype(float), sub["_dim1_raw"].astype(float))[0, 1])
+        loading_rows.append({"潜变量": dim1_name, "测量题项": c, "标准化载荷": round(r_load, 3)})
     for c in qual_cols:
-        r_load = float(np.corrcoef(sub[c].astype(float), sub["_qual_raw"].astype(float))[0, 1])
-        loading_rows.append({"潜变量": "品质感知", "测量题项": c, "标准化载荷": round(r_load, 3)})
+        r_load = float(np.corrcoef(sub[c].astype(float), sub["_dim2_raw"].astype(float))[0, 1])
+        loading_rows.append({"潜变量": dim2_name, "测量题项": c, "标准化载荷": round(r_load, 3)})
     loadings_table = pd.DataFrame(loading_rows)
 
     r2 = float(ols_res["r2"])
     conclusion = (
-        f"结构方程路径模型显示：价格感知（β={beta_price:+.2f}, p={p_price:.4f}）与"
-        f"品质感知（β={beta_qual:+.2f}, p={p_qual:.4f}）均显著正向驱动{target_col}，"
-        f"合计解释 {r2 * 100:.1f}% 方差（R²={r2:.3f}, n={n_valid}）。"
+        f"结构方程路径模型显示：{dim1_name}（β={beta_price:+.2f}, p={p_price:.4f}）与"
+        f"{dim2_name}（β={beta_qual:+.2f}, p={p_qual:.4f}）对{target_col}的联合解释方差达 "
+        f"{r2 * 100:.1f}%（R²={r2:.3f}, n={n_valid}）。"
     )
     return {
+        "dim1_name": dim1_name,
+        "dim2_name": dim2_name,
+        "target_col": target_col,
         "path_table": path_table,
         "loadings_table": loadings_table,
         "beta_price": beta_price,
@@ -2399,15 +3027,15 @@ def calc_kano_model(
     counts_records: list = None,
 ) -> dict:
     """
-    S2 KANO 模型 Better-Worse 系数与四象限分类计算：
+    S2 KANO 模型 Better-Worse 系数与四象限分类计算（纯真实数据驱动，无合成回退）：
     - Better (满意影响力) = (A + O) / (A + O + M + I)
     - Worse (不满意影响力) = - (O + M) / (A + O + M + I)
     支持：
-    1) 直接传入 counts_records: [{"功能": str, "A": int, "O": int, "M": int, "I": int, "R": int, "Q": int}, ...]
-    2) 传入问卷正反向配对列 (df, pos_cols, neg_cols)
-    3) 默认内置咖啡功能需求演示数据（n=282）
+    1) 传入 counts_records 汇总计数记录（用于单元测试与汇总表分析）；
+    2) 传入问卷正反向配对列 (df, pos_cols, neg_cols) 或由 df 自动识别成对 KANO 列。
     """
     rows = []
+    n_respondents = 0
     if counts_records is not None:
         for rec in counts_records:
             nm = str(rec.get("功能", rec.get("feature", "功能项")))
@@ -2418,6 +3046,7 @@ def calc_kano_model(
             R = int(rec.get("R", 0))
             Q = int(rec.get("Q", 0))
             denom = A + O + M + I
+            n_respondents = max(n_respondents, denom + R + Q)
             better = (A + O) / denom if denom > 0 else 0.0
             worse = - (O + M) / denom if denom > 0 else 0.0
             rows.append({
@@ -2427,10 +3056,21 @@ def calc_kano_model(
                 "Worse系数": round(worse, 4),
                 "Worse绝对值": round(abs(worse), 4),
             })
-    elif isinstance(df, pd.DataFrame) and pos_cols and neg_cols and len(pos_cols) == len(neg_cols):
+    elif isinstance(df, pd.DataFrame) and not df.empty:
+        if not (pos_cols and neg_cols):
+            k_info = detect_kano_columns(df)
+            if not k_info["enabled"]:
+                raise ValueError("当前数据集未检测到成对的正向/反向 KANO 评价列，无法执行 KANO 分析。")
+            pos_cols = k_info["pos_cols"]
+            neg_cols = k_info["neg_cols"]
+            if not feature_names:
+                feature_names = k_info["feature_names"]
+        if len(pos_cols) != len(neg_cols) or len(pos_cols) == 0:
+            raise ValueError("KANO 模型正向题项列与反向题项列数量必须一致且不少于 1 对。")
         names = feature_names if (feature_names and len(feature_names) == len(pos_cols)) else [f"功能{i+1}" for i in range(len(pos_cols))]
         for nm, pc, nc in zip(names, pos_cols, neg_cols):
             sub = df[[pc, nc]].apply(pd.to_numeric, errors="coerce").dropna()
+            n_respondents = max(n_respondents, len(sub))
             cats = [
                 _KANO_EVAL_MATRIX.get((int(round(r[pc])), int(round(r[nc]))), "I")
                 for _, r in sub.iterrows()
@@ -2453,20 +3093,9 @@ def calc_kano_model(
                 "Worse绝对值": round(abs(worse), 4),
             })
     else:
-        # 默认内置 7 项咖啡产品与服务功能 KANO 统计数据 (n=282)
-        demo_records = [
-            {"功能": "季节限定新品", "A": 152, "O": 51, "M": 0,   "I": 79,  "R": 0, "Q": 0},
-            {"功能": "出餐≤5分钟",   "A": 51,  "O": 141, "M": 28,  "I": 62,  "R": 0, "Q": 0},
-            {"功能": "价格透明",     "A": 25,  "O": 130, "M": 73,  "I": 54,  "R": 0, "Q": 0},
-            {"功能": "现磨现做",     "A": 14,  "O": 104, "M": 116, "I": 48,  "R": 0, "Q": 0},
-            {"功能": "外卖包装防洒", "A": 42,  "O": 93,  "M": 62,  "I": 85,  "R": 0, "Q": 0},
-            {"功能": "会员积分",     "A": 56,  "O": 43,  "M": 28,  "I": 155, "R": 0, "Q": 0},
-            {"功能": "杯型可选",     "A": 45,  "O": 40,  "M": 22,  "I": 175, "R": 0, "Q": 0},
-        ]
-        return calc_kano_model(counts_records=demo_records)
+        raise ValueError("KANO 模型缺少有效的成对正反向问卷数据列或统计输入。")
 
     kano_df = pd.DataFrame(rows)
-    # 象限划分阈值：默认以 0.50 作为 Better 与 |Worse| 的分割基准线
     split_better = 0.50
     split_worse = 0.50
     quadrants = []
@@ -2501,6 +3130,7 @@ def calc_kano_model(
     )
     return {
         "table": kano_df,
+        "n_valid": n_respondents,
         "split_better": split_better,
         "split_worse": split_worse,
         "conclusion": conclusion,
@@ -2513,122 +3143,122 @@ def calc_conjoint_analysis(
     rating_col: str = None,
 ) -> dict:
     """
-    S3 联合分析 (Conjoint Analysis)：
-    基于全轮廓实验设计虚拟变量 OLS 回归估计各属性水平的部分价值（Part-Worth Utility），
-    对每个属性内部做零中心化（Zero-Centered Utilities），并计算属性极差与相对重要性（总和严格 = 100.0%）。
+    S3 联合分析 (Conjoint Analysis，纯真实数据 OLS 估计，无合成回退)：
+    基于轮廓实验虚拟变量效应编码 OLS 回归估计各属性水平的部分价值（Part-Worth Utility），
+    对每个属性内部严格执行零中心化（Zero-Centered Utilities），并计算属性极差与相对重要性（总和 = 100.0%）。
     """
-    if isinstance(profiles_df, pd.DataFrame) and attr_cols and rating_col:
-        sub = profiles_df[attr_cols + [rating_col]].dropna().copy()
-        y = pd.to_numeric(sub[rating_col], errors="coerce").to_numpy(dtype=float)
-        # 构建效应编码 / 虚拟变量回归并做属性内零中心化
-        X_parts = [np.ones((len(sub), 1))]
-        attr_levels_map = {}
-        col_slices = {}
-        curr_idx = 1
-        for ac in attr_cols:
-            levels = list(pd.unique(sub[ac].astype(str)))
-            attr_levels_map[ac] = levels
-            if len(levels) > 1:
-                dummies = pd.get_dummies(sub[ac].astype(str), dtype=float)[levels[:-1]].to_numpy()
-                # 效应编码：最后一个水平全为 -1
-                last_mask = (sub[ac].astype(str) == levels[-1]).to_numpy()
-                dummies[last_mask, :] = -1.0
-                X_parts.append(dummies)
-                col_slices[ac] = (curr_idx, curr_idx + len(levels) - 1)
-                curr_idx += len(levels) - 1
-            else:
-                col_slices[ac] = (curr_idx, curr_idx)
+    if not isinstance(profiles_df, pd.DataFrame) or profiles_df.empty:
+        raise ValueError("联合分析需要传入包含轮廓属性列与总体评分列的真实数据集。")
 
-        X_mat = np.hstack(X_parts)
-        betas, _, _, _ = np.linalg.lstsq(X_mat, y, rcond=None)
-        y_hat = X_mat @ betas
-        ss_res = float(np.sum((y - y_hat) ** 2))
-        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    if not attr_cols or not rating_col:
+        cj_info = detect_conjoint_columns(profiles_df)
+        if not cj_info["enabled"]:
+            raise ValueError("当前数据集未检测到联合分析属性水平列与总体评分列。")
+        attr_cols = attr_cols or cj_info["attr_cols"]
+        rating_col = rating_col or cj_info["rating_col"]
 
-        utility_rows = []
-        importance_rows = []
-        ranges = {}
-        raw_utils_by_attr = {}
-        for ac in attr_cols:
-            levels = attr_levels_map[ac]
-            s_i, e_i = col_slices[ac]
-            if e_i > s_i:
-                b_sub = betas[s_i:e_i]
-                u_vals = np.append(b_sub, -np.sum(b_sub))
-            else:
-                u_vals = np.zeros(len(levels))
-            # 确保零中心化
-            u_vals = u_vals - np.mean(u_vals)
-            raw_utils_by_attr[ac] = (levels, u_vals)
-            ranges[ac] = float(np.max(u_vals) - np.min(u_vals))
+    sub = profiles_df[attr_cols + [rating_col]].dropna().copy()
+    sub[rating_col] = pd.to_numeric(sub[rating_col], errors="coerce")
+    sub = sub.dropna()
+    if len(sub) < 6:
+        raise ValueError("联合分析有效评价记录不足 6 条，无法稳健估计部分价值效用。")
 
-        total_range = sum(ranges.values())
-        if total_range <= 0:
-            total_range = 1.0
+    y = sub[rating_col].to_numpy(dtype=float)
+    X_parts = [np.ones((len(sub), 1))]
+    attr_levels_map = {}
+    col_slices = {}
+    curr_idx = 1
 
-        for ac in attr_cols:
-            levels, u_vals = raw_utils_by_attr[ac]
-            imp_pct = ranges[ac] / total_range * 100.0
-            importance_rows.append({
-                "属性名称": ac,
-                "效用极差(Range)": round(ranges[ac], 4),
-                "相对重要性(%)": imp_pct,
+    for ac in attr_cols:
+        levels = list(pd.unique(sub[ac].astype(str)))
+        attr_levels_map[ac] = levels
+        if len(levels) > 1:
+            dummies = pd.get_dummies(sub[ac].astype(str), dtype=float)[levels[:-1]].to_numpy(copy=True)
+            last_mask = (sub[ac].astype(str) == levels[-1]).to_numpy()
+            dummies[last_mask, :] = -1.0
+            X_parts.append(dummies)
+            col_slices[ac] = (curr_idx, curr_idx + len(levels) - 1)
+            curr_idx += len(levels) - 1
+        else:
+            col_slices[ac] = (curr_idx, curr_idx)
+
+    X_mat = np.hstack(X_parts)
+    betas, _, _, _ = np.linalg.lstsq(X_mat, y, rcond=None)
+    y_hat = X_mat @ betas
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+
+    def _clean_attr_label(col_nm: str) -> str:
+        s = str(col_nm).strip()
+        for pre in ("联合属性_", "轮廓属性_", "conjoint_attr_"):
+            if s.startswith(pre):
+                return s[len(pre):]
+        return s
+
+    utility_rows = []
+    importance_rows = []
+    ranges = {}
+    raw_utils_by_attr = {}
+    clean_names = {}
+
+    for ac in attr_cols:
+        disp_nm = _clean_attr_label(ac)
+        clean_names[ac] = disp_nm
+        levels = attr_levels_map[ac]
+        s_i, e_i = col_slices[ac]
+        if e_i > s_i:
+            b_sub = betas[s_i:e_i]
+            u_vals = np.append(b_sub, -np.sum(b_sub))
+        else:
+            u_vals = np.zeros(len(levels))
+        u_vals = u_vals - np.mean(u_vals)
+        # 四舍五入后修正末项残差，严格保证每个属性内部效用值之和精确为 0.0000
+        u_rounded = np.round(u_vals, 4)
+        if len(u_rounded) > 1:
+            u_rounded[-1] = round(-float(np.sum(u_rounded[:-1])), 4)
+        raw_utils_by_attr[ac] = (levels, u_rounded)
+        ranges[ac] = float(np.max(u_rounded) - np.min(u_rounded))
+
+    total_range = sum(ranges.values())
+    if total_range <= 0:
+        total_range = 1.0
+
+    for ac in attr_cols:
+        disp_nm = clean_names[ac]
+        levels, u_rounded = raw_utils_by_attr[ac]
+        imp_pct = ranges[ac] / total_range * 100.0
+        importance_rows.append({
+            "属性名称": disp_nm,
+            "效用极差(Range)": round(ranges[ac], 4),
+            "相对重要性(%)": imp_pct,
+        })
+        for lv, uv in zip(levels, u_rounded):
+            utility_rows.append({
+                "属性名称": disp_nm,
+                "属性水平": lv,
+                "部分价值(Utility)": float(uv),
             })
-            for lv, uv in zip(levels, u_vals):
-                utility_rows.append({
-                    "属性名称": ac,
-                    "属性水平": lv,
-                    "部分价值(Utility)": round(float(uv), 4),
-                })
 
-        imp_df = pd.DataFrame(importance_rows).sort_values("相对重要性(%)", ascending=False).reset_index(drop=True)
-        # 严格保证四舍五入后总和仍为 100.0%
-        rounded_imps = imp_df["相对重要性(%)"].round(1).to_numpy()
-        diff = round(100.0 - float(np.sum(rounded_imps)), 1)
-        if len(rounded_imps) > 0 and diff != 0:
-            rounded_imps[0] = round(rounded_imps[0] + diff, 1)
-        imp_df["相对重要性(%)"] = rounded_imps
-        util_df = pd.DataFrame(utility_rows)
-    else:
-        # 内置咖啡产品正交轮廓联合分析数据（精确对应样板 36 & 37）
-        imp_df = pd.DataFrame([
-            {"属性名称": "价格",     "效用极差(Range)": 1.67, "相对重要性(%)": 38.2},
-            {"属性名称": "口味类型", "效用极差(Range)": 1.40, "相对重要性(%)": 27.5},
-            {"属性名称": "品牌",     "效用极差(Range)": 0.87, "相对重要性(%)": 18.6},
-            {"属性名称": "杯型容量", "效用极差(Range)": 0.98, "相对重要性(%)": 15.7},
-        ])
-        util_df = pd.DataFrame([
-            {"属性名称": "价格",     "属性水平": "9元",       "部分价值(Utility)":  0.82},
-            {"属性名称": "价格",     "属性水平": "13元",      "部分价值(Utility)":  0.31},
-            {"属性名称": "价格",     "属性水平": "17元",      "部分价值(Utility)": -0.28},
-            {"属性名称": "价格",     "属性水平": "21元",      "部分价值(Utility)": -0.85},
-            {"属性名称": "口味类型", "属性水平": "生椰拿铁",  "部分价值(Utility)":  0.64},
-            {"属性名称": "口味类型", "属性水平": "经典拿铁",  "部分价值(Utility)":  0.22},
-            {"属性名称": "口味类型", "属性水平": "美式",      "部分价值(Utility)": -0.10},
-            {"属性名称": "口味类型", "属性水平": "手冲单品",  "部分价值(Utility)": -0.76},
-            {"属性名称": "品牌",     "属性水平": "瑞幸",      "部分价值(Utility)":  0.35},
-            {"属性名称": "品牌",     "属性水平": "库迪",      "部分价值(Utility)":  0.12},
-            {"属性名称": "品牌",     "属性水平": "星巴克",    "部分价值(Utility)":  0.05},
-            {"属性名称": "品牌",     "属性水平": "Manner",    "部分价值(Utility)": -0.52},
-            {"属性名称": "杯型容量", "属性水平": "大杯473ml", "部分价值(Utility)":  0.44},
-            {"属性名称": "杯型容量", "属性水平": "中杯355ml", "部分价值(Utility)":  0.10},
-            {"属性名称": "杯型容量", "属性水平": "小杯237ml", "部分价值(Utility)": -0.54},
-        ])
-        r2 = 0.892
+    imp_df = pd.DataFrame(importance_rows).sort_values("相对重要性(%)", ascending=False).reset_index(drop=True)
+    rounded_imps = imp_df["相对重要性(%)"].round(1).to_numpy(copy=True)
+    diff = round(100.0 - float(np.sum(rounded_imps)), 1)
+    if len(rounded_imps) > 0 and diff != 0:
+        rounded_imps[0] = round(rounded_imps[0] + diff, 1)
+    imp_df["相对重要性(%)"] = rounded_imps
+    util_df = pd.DataFrame(utility_rows)
 
-    # 寻找最优组合
     best_levels = []
-    for ac in imp_df["属性名称"]:
-        sub_u = util_df[util_df["属性名称"] == ac].sort_values("部分价值(Utility)", ascending=False)
+    for ac_nm in imp_df["属性名称"]:
+        sub_u = util_df[util_df["属性名称"] == ac_nm].sort_values("部分价值(Utility)", ascending=False)
         if not sub_u.empty:
             best_levels.append(f"{sub_u.iloc[0]['属性水平']}")
     top_attr = imp_df.iloc[0]
     sec_attr = imp_df.iloc[1] if len(imp_df) > 1 else top_attr
     conclusion = (
-        f"联合分析显示：{top_attr['属性名称']}对购买决策影响最大（相对重要性 {top_attr['相对重要性(%)']:.1f}%），"
+        f"联合分析显示：{top_attr['属性名称']}对决策影响最大（相对重要性 {top_attr['相对重要性(%)']:.1f}%），"
         f"{sec_attr['属性名称']}次之（{sec_attr['相对重要性(%)']:.1f}%）；"
-        f"最优产品组合为「{' + '.join(best_levels)}」。"
+        f"最优轮廓组合为「{' + '.join(best_levels)}」。"
     )
     return {
         "importance_df": imp_df,
@@ -2636,19 +3266,23 @@ def calc_conjoint_analysis(
         "importance_sum": round(float(imp_df["相对重要性(%)"].sum()), 4),
         "best_combo": " + ".join(best_levels),
         "r2": r2,
+        "n_valid": len(sub),
         "conclusion": conclusion,
     }
 
 
-def calc_word_cooccurrence(series: pd.Series, stopwords: set = None, top_n: int = 16, min_cooc: int = 8) -> dict:
-    """计算开放题高频词共现网络（节点词频与同句共现边权重）。"""
+def calc_word_cooccurrence(series: pd.Series, stopwords: set = None, top_n: int = 16, min_cooc: int = 4) -> dict:
+    """计算开放题高频词共现网络（节点词频与同句共现边权重，纯实测文本统计）。"""
     sw = set(DEFAULT_STOPWORDS)
     if stopwords:
         sw |= set(stopwords)
 
     docs_tokens = []
     word_counts = Counter()
-    for text in series.dropna().astype(str):
+    clean_texts = series.dropna().astype(str).str.strip()
+    clean_texts = clean_texts[~clean_texts.isin(["", "nan", "None", "无", "没有"])]
+
+    for text in clean_texts:
         words = [w.strip() for w in jieba.lcut(text) if len(w.strip()) >= 2 and w.strip() not in sw and not w.strip().isdigit()]
         uniq_w = sorted(set(words))
         docs_tokens.append(uniq_w)
@@ -2680,75 +3314,163 @@ def calc_word_cooccurrence(series: pd.Series, stopwords: set = None, top_n: int 
             {"源词": u, "目标词": v, "共现频次": int(cnt)}
             for (u, v), cnt in pair_counts.most_common(15)
         ]
-    edges_df = pd.DataFrame(edges_rows)
-    top_edge = edges_df.iloc[0] if not edges_df.empty else {"源词": "生椰拿铁", "目标词": "口感醇厚", "共现频次": 68}
-    conclusion = (
-        f"高频词共现网络显示：「{top_edge['源词']}—{top_edge['目标词']}」共现频次最高（{top_edge['共现频次']} 次），"
-        f"形成以口味体验与价格性价比为核心的双语义簇。"
-    )
+    edges_df = pd.DataFrame(edges_rows, columns=["源词", "目标词", "共现频次"])
+    if not edges_df.empty:
+        top_edge = edges_df.iloc[0]
+        conclusion = (
+            f"高频词共现网络显示：「{top_edge['源词']}—{top_edge['目标词']}」同句共现频次最高（{top_edge['共现频次']} 次），"
+            f"共提取 {len(nodes_df)} 个核心语义节点与 {len(edges_df)} 条共现关联。"
+        )
+    else:
+        conclusion = f"共提取 {len(nodes_df)} 个高频词语，但同句共现频次较低，未形成显著语义共现簇。"
     return {
         "nodes_df": nodes_df,
         "edges_df": edges_df,
+        "n_valid_texts": int(len(clean_texts)),
         "conclusion": conclusion,
     }
 
 
 def calc_sentiment_analysis(series: pd.Series) -> dict:
-    """开放题评论情感倾向与五大评价维度情感极性分布分析。"""
-    pos_words = {"醇厚", "好喝", "性价比", "划算", "惊艳", "喜欢", "推荐", "快", "方便", "清爽", "顺滑", "稳定", "香气", "满意"}
-    neg_words = {"偏高", "慢", "排队", "淡", "甜", "贵", "少", "不稳定", "洒", "差", "一般", "失望"}
+    """开放题评论情感极性及细分主题维度情感分布分析（100% 基于实测文本词典命中计算，无写死数值）。"""
+    pos_words = {
+        "醇厚", "好喝", "性价比", "划算", "惊艳", "喜欢", "推荐", "快", "方便", "清爽",
+        "顺滑", "稳定", "香气", "满意", "优秀", "丰富", "合理", "热情", "整洁", "安静",
+        "漂亮", "细腻", "新鲜", "回甘", "精致", "友好", "舒服", "省心", "实在", "充足",
+        "好", "棒", "赞", "不错", "贴心", "优质", "清晰", "流畅", "实惠",
+    }
+    neg_words = {
+        "偏高", "慢", "排队", "淡", "贵", "少", "不稳定", "洒", "漏洒", "差",
+        "失望", "卡顿", "拥挤", "涨", "单薄", "难", "负担", "抱怨", "糟糕", "不满",
+        "繁琐", "混乱", "嘈杂", "敷衍", "延迟", "太久", "不便",
+    }
 
-    sentiments = []
-    for text in series.dropna().astype(str):
-        p_hit = sum(1 for w in pos_words if w in text)
-        n_hit = sum(1 for w in neg_words if w in text)
+    clean_s = series.dropna().astype(str).str.strip()
+    clean_s = clean_s[~clean_s.isin(["", "nan", "None", "无", "没有"])]
+    texts = clean_s.tolist()
+
+    def _score_text(txt: str) -> str:
+        p_hit = sum(1 for w in pos_words if w in txt)
+        n_hit = sum(1 for w in neg_words if w in txt)
         if p_hit > n_hit:
-            sentiments.append("正向")
-        elif n_hit > p_hit:
-            sentiments.append("负向")
-        else:
-            sentiments.append("中性")
+            return "正向"
+        if n_hit > p_hit:
+            return "负向"
+        return "中性"
 
-    s_cnt = pd.Series(sentiments).value_counts()
+    sentiments = [_score_text(t) for t in texts]
+    s_cnt = pd.Series(sentiments, dtype=object).value_counts()
     total = max(len(sentiments), 1)
     overall_df = pd.DataFrame([
         {"情感极性": k, "评论数": int(s_cnt.get(k, 0)), "占比(%)": round(s_cnt.get(k, 0) / total * 100.0, 1)}
         for k in ["正向", "中性", "负向"]
     ])
 
-    # 五大细分评价维度正/中/负占比（用于 48-情感分布图）
-    aspect_df = pd.DataFrame([
-        {"评价维度": "口味与香气", "正向占比(%)": 72.0, "中性占比(%)": 18.0, "负向占比(%)": 10.0, "净情感得分(NSS)": 62.0},
-        {"评价维度": "新品创新度", "正向占比(%)": 66.0, "中性占比(%)": 22.0, "负向占比(%)": 12.0, "净情感得分(NSS)": 54.0},
-        {"评价维度": "门店与包装", "正向占比(%)": 54.0, "中性占比(%)": 29.0, "负向占比(%)": 17.0, "净情感得分(NSS)": 37.0},
-        {"评价维度": "价格性价比", "正向占比(%)": 48.0, "中性占比(%)": 24.0, "负向占比(%)": 28.0, "净情感得分(NSS)": 20.0},
-        {"评价维度": "出餐与配送", "正向占比(%)": 41.0, "中性占比(%)": 25.0, "负向占比(%)": 34.0, "净情感得分(NSS)": 7.0},
-    ])
+    default_aspects = {
+        "口味与品质": ["口感", "醇厚", "香气", "味道", "风味", "回甘", "顺滑", "咖啡豆", "冷萃", "生椰", "拿铁", "冰块", "品质"],
+        "新品与品类": ["新品", "季节", "限定", "联名", "手冲", "低因", "燕麦奶", "植物奶", "早餐", "面包", "品类"],
+        "门店与包装": ["门店", "环境", "安静", "整洁", "座位", "办公", "包装", "漏洒", "杯量", "杯型", "插座"],
+        "价格性价比": ["价格", "性价比", "优惠", "划算", "便宜", "涨", "贵", "负担", "积分", "福利", "门槛"],
+        "服务与效率": ["出餐", "速度", "排队", "服务", "店员", "动线", "外卖", "小程序", "卡顿", "预约", "品控"],
+    }
+
+    aspect_rows = []
+    for asp_nm, kws in default_aspects.items():
+        matched_txts = [t for t in texts if any(kw in t for kw in kws)]
+        if len(matched_txts) >= 2:
+            sub_sents = [_score_text(t) for t in matched_txts]
+            n_m = len(sub_sents)
+            pp = round(sub_sents.count("正向") / n_m * 100.0, 1)
+            neup = round(sub_sents.count("中性") / n_m * 100.0, 1)
+            negp = round(100.0 - pp - neup, 1)
+            aspect_rows.append({
+                "评价维度": asp_nm,
+                "提及样本数": n_m,
+                "正向占比(%)": pp,
+                "中性占比(%)": neup,
+                "负向占比(%)": max(0.0, negp),
+                "净情感得分(NSS)": round(pp - max(0.0, negp), 1),
+            })
+
+    # 若通用非餐饮问卷未命中默认词簇，则自动提取前 5 高频主题词计算各主题情感极性
+    if len(aspect_rows) < 2 and texts:
+        txt_info = analyze_open_text(clean_s, top_n=5)
+        for _, r_w in txt_info["freq_df"].head(5).iterrows():
+            w = str(r_w["词语"])
+            matched_txts = [t for t in texts if w in t]
+            if not matched_txts:
+                continue
+            sub_sents = [_score_text(t) for t in matched_txts]
+            n_m = len(sub_sents)
+            pp = round(sub_sents.count("正向") / n_m * 100.0, 1)
+            neup = round(sub_sents.count("中性") / n_m * 100.0, 1)
+            negp = round(100.0 - pp - neup, 1)
+            aspect_rows.append({
+                "评价维度": f"「{w}」相关",
+                "提及样本数": n_m,
+                "正向占比(%)": pp,
+                "中性占比(%)": neup,
+                "负向占比(%)": max(0.0, negp),
+                "净情感得分(NSS)": round(pp - max(0.0, negp), 1),
+            })
+
+    if not aspect_rows:
+        pp = float(overall_df.loc[overall_df["情感极性"] == "正向", "占比(%)"].iloc[0])
+        neup = float(overall_df.loc[overall_df["情感极性"] == "中性", "占比(%)"].iloc[0])
+        negp = float(overall_df.loc[overall_df["情感极性"] == "负向", "占比(%)"].iloc[0])
+        aspect_rows = [{
+            "评价维度": "总体评价",
+            "提及样本数": len(texts),
+            "正向占比(%)": pp,
+            "中性占比(%)": neup,
+            "负向占比(%)": negp,
+            "净情感得分(NSS)": round(pp - negp, 1),
+        }]
+
+    aspect_df = pd.DataFrame(aspect_rows).sort_values("净情感得分(NSS)", ascending=False).reset_index(drop=True)
     pos_pct = float(overall_df.loc[overall_df["情感极性"] == "正向", "占比(%)"].iloc[0])
     neg_pct = float(overall_df.loc[overall_df["情感极性"] == "负向", "占比(%)"].iloc[0])
+    top_asp = aspect_df.iloc[0]
+    bot_asp = aspect_df.sort_values("负向占比(%)", ascending=False).iloc[0]
     conclusion = (
-        f"开放题情感分析显示：整体正向评论占比 {pos_pct:.1f}%、负向占比 {neg_pct:.1f}%；"
-        f"细分维度中「口味与香气」正向评价最高（72.0%），「出餐与配送」负向反馈最集中（34.0%）。"
+        f"开放题情感分析显示（有效文本 n={len(texts)}）：整体正向评论占 {pos_pct:.1f}%、负向占 {neg_pct:.1f}%；"
+        f"细分主题中「{top_asp['评价维度']}」净情感最高（正向 {top_asp['正向占比(%)']:.1f}%），"
+        f"「{bot_asp['评价维度']}」负向反馈占比为 {bot_asp['负向占比(%)']:.1f}%。"
     )
     return {
         "overall_df": overall_df,
         "aspect_df": aspect_df,
+        "n_valid_texts": len(texts),
         "conclusion": conclusion,
     }
 
 
-def _prepare_ml_features(df: pd.DataFrame, target_col: str = "NPS推荐度"):
-    """内部辅助：构建用于随机森林与决策树分类预测的特征矩阵 X 与二分类目标 y (推荐者 NPS>=9)。"""
+def _prepare_ml_features(df: pd.DataFrame, target_col: str = None, feature_cols: list = None):
+    """内部辅助：构建分类预测模型的特征矩阵 X 与二分类目标 y（自适应通用数据集与咖啡基准数据集）。"""
     work = df.copy()
     if "品质量表3_正向" not in work.columns and "品质量表3_品质不稳定_反向" in work.columns:
         work["品质量表3_正向"] = reverse_score(work["品质量表3_品质不稳定_反向"], max_scale=5)
-    work["品质感知均分"] = compute_scale_composite(work, ["品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"])
-    work["价格感知均分"] = compute_scale_composite(work, ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引"])
+    if all(c in work.columns for c in ["品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"]):
+        work["品质感知均分"] = compute_scale_composite(work, ["品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_正向"])
+    if all(c in work.columns for c in ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引"]):
+        work["价格感知均分"] = compute_scale_composite(work, ["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引"])
 
-    freq_map = {"每天1杯及以上": 4, "每周3-5杯": 3, "每周1-2杯": 2, "每月1-3杯": 1, "几乎不喝": 0}
-    age_map = {"18-24岁": 1, "25-30岁": 2, "31-35岁": 3, "36-45岁": 4, "46岁及以上": 5}
-    work["消费频次得分"] = work["消费频次"].map(freq_map).fillna(2)
-    work["年龄段编码"] = work["年龄段"].map(age_map).fillna(2)
+    if "消费频次" in work.columns:
+        freq_map = {"每天1杯及以上": 4, "每周3-5杯": 3, "每周1-2杯": 2, "每月1-3杯": 1, "偶尔饮用": 1, "几乎不喝": 0}
+        work["消费频次得分"] = work["消费频次"].map(freq_map).fillna(2)
+    if "年龄段" in work.columns:
+        age_map = {"18-24岁": 1, "25-30岁": 2, "31-35岁": 3, "31-40岁": 3, "36-45岁": 4, "40岁以上": 5, "46岁及以上": 5}
+        work["年龄段编码"] = work["年龄段"].map(age_map).fillna(2)
+
+    if target_col is None or target_col not in work.columns:
+        if "NPS推荐度" in work.columns:
+            target_col = "NPS推荐度"
+        else:
+            qt = auto_detect_question_types(work)
+            cands = [c for c, t in qt.items() if t in ("NPS题", "数值题", "量表题")]
+            if not cands:
+                raise ValueError("当前数据集缺少可用于预测建模的数值/量表目标列。")
+            target_col = cands[-1]
 
     feature_map = {
         "品质感知均分": "品质感知均分",
@@ -2761,22 +3483,54 @@ def _prepare_ml_features(df: pd.DataFrame, target_col: str = "NPS推荐度"):
         "满意度3_门店环境": "环境满意度",
         "年龄段编码": "年龄段",
     }
-    raw_cols = [c for c in feature_map.keys() if c in work.columns]
+    if feature_cols:
+        raw_cols = [c for c in feature_cols if c in work.columns and c != target_col]
+        rename_dict = {c: str(c) for c in raw_cols}
+    else:
+        raw_cols = [c for c in feature_map.keys() if c in work.columns and c != target_col]
+        if len(raw_cols) >= 2:
+            rename_dict = feature_map
+        else:
+            qt = auto_detect_question_types(work)
+            dur_c = detect_duration_column(work)
+            raw_cols = [
+                c for c, t in qt.items()
+                if t in ("量表题", "数值题", "NPS题") and c != target_col and c != dur_c
+                and not str(c).startswith(("KANO正向_", "KANO反向_"))
+            ]
+            rename_dict = {c: str(c) for c in raw_cols}
+
+    if len(raw_cols) < 2:
+        raise ValueError("可用数值/量表特征不足 2 列，无法训练分类树/随机森林模型。")
+
     sub = work[raw_cols + [target_col]].apply(pd.to_numeric, errors="coerce").dropna()
-    X = sub[raw_cols].rename(columns=feature_map)
-    y = (sub[target_col] >= 9).astype(int)
-    return X, y
+    if len(sub) < 20:
+        raise ValueError("有效完整样本不足 20 份，无法执行训练/测试集划分与树模型评估。")
+
+    X = sub[raw_cols].rename(columns=rename_dict)
+    t_s = sub[target_col]
+    if float(t_s.max()) >= 9 and float(t_s.min()) >= 0 and float(t_s.max()) <= 10:
+        y = (t_s >= 9).astype(int)
+        pos_label_desc = f"{target_col}≥9"
+    else:
+        med_v = float(t_s.median())
+        y = (t_s > med_v).astype(int)
+        if y.nunique() < 2:
+            y = (t_s >= med_v).astype(int)
+        pos_label_desc = f"{target_col}>{med_v:.1f}"
+    return X, y, pos_label_desc
 
 
-def calc_random_forest_model(df: pd.DataFrame, target_col: str = "NPS推荐度", seed: int = 42) -> dict:
-    """随机森林分类模型：预测高推荐意愿客户（NPS ≥ 9），输出特征重要性及测试集混淆矩阵。"""
+def calc_random_forest_model(df: pd.DataFrame, target_col: str = None, feature_cols: list = None, seed: int = 42) -> dict:
+    """随机森林分类模型：输出特征重要性排序及测试集混淆矩阵。"""
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 
-    X, y = _prepare_ml_features(df, target_col=target_col)
+    X, y, pos_desc = _prepare_ml_features(df, target_col=target_col, feature_cols=feature_cols)
+    strat = y if y.value_counts().min() >= 2 else None
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.30, random_state=seed, stratify=y
+        X, y, test_size=0.30, random_state=seed, stratify=strat
     )
     rf = RandomForestClassifier(n_estimators=300, max_depth=6, random_state=seed)
     rf.fit(X_train, y_train)
@@ -2797,7 +3551,7 @@ def calc_random_forest_model(df: pd.DataFrame, target_col: str = "NPS推荐度",
 
     top2 = imp_df.head(2)["特征名称"].tolist()
     conclusion = (
-        f"随机森林模型显示：{'与'.join(top2)}是预测高推荐意愿（NPS≥9）的最核心特征"
+        f"随机森林模型显示：{'与'.join(top2)}是预测高水平组（{pos_desc}）的最核心特征"
         f"（合计贡献 {imp_df.head(2)['重要性占比(%)'].sum():.1f}%），测试集准确率达 {acc * 100:.1f}%。"
     )
     return {
@@ -2809,16 +3563,18 @@ def calc_random_forest_model(df: pd.DataFrame, target_col: str = "NPS推荐度",
         "f1": f1,
         "n_train": len(X_train),
         "n_test": len(X_test),
+        "pos_label_desc": pos_desc,
         "conclusion": conclusion,
     }
 
 
-def calc_decision_tree_model(df: pd.DataFrame, target_col: str = "NPS推荐度", max_depth: int = 3, seed: int = 42) -> dict:
+def calc_decision_tree_model(df: pd.DataFrame, target_col: str = None, feature_cols: list = None, max_depth: int = 3, seed: int = 42) -> dict:
     """决策树规则提取模型：输出树结构对象与关键节点分群规则表。"""
     from sklearn.tree import DecisionTreeClassifier
 
-    X, y = _prepare_ml_features(df, target_col=target_col)
-    dt = DecisionTreeClassifier(max_depth=max_depth, min_samples_leaf=15, random_state=seed)
+    X, y, pos_desc = _prepare_ml_features(df, target_col=target_col, feature_cols=feature_cols)
+    min_leaf = max(3, min(15, len(X) // 12))
+    dt = DecisionTreeClassifier(max_depth=max_depth, min_samples_leaf=min_leaf, random_state=seed)
     dt.fit(X, y)
     acc = float(dt.score(X, y))
 
@@ -2828,7 +3584,7 @@ def calc_decision_tree_model(df: pd.DataFrame, target_col: str = "NPS推荐度",
     for node_id in range(tree_.node_count):
         n_s = int(tree_.n_node_samples[node_id])
         val = tree_.value[node_id][0]
-        pos_rate = float(val[1] / np.sum(val) * 100.0) if np.sum(val) > 0 else 0.0
+        pos_rate = float(val[1] / np.sum(val) * 100.0) if len(val) > 1 and np.sum(val) > 0 else 0.0
         is_leaf = tree_.children_left[node_id] == tree_.children_right[node_id]
         feat_nm = "叶节点" if is_leaf else feature_names[tree_.feature[node_id]]
         thresh = None if is_leaf else float(tree_.threshold[node_id])
@@ -2847,28 +3603,38 @@ def calc_decision_tree_model(df: pd.DataFrame, target_col: str = "NPS推荐度",
     best_leaf = leaf_df.iloc[0]
     conclusion = (
         f"决策树规则（深度={max_depth}）显示：根节点按「{nodes_df.iloc[0]['分裂特征']}」分裂，"
-        f"最高转化叶节点推荐者占比达 {best_leaf['推荐者占比(%)']:.1f}%（n={best_leaf['样本数']}，整体准确率 {acc * 100:.1f}%）。"
+        f"最高转化叶节点目标占比达 {best_leaf['推荐者占比(%)']:.1f}%（n={best_leaf['样本数']}，整体准确率 {acc * 100:.1f}%）。"
     )
     return {
         "model": dt,
         "feature_names": feature_names,
         "nodes_df": nodes_df,
         "accuracy": acc,
+        "pos_label_desc": pos_desc,
         "conclusion": conclusion,
     }
 
 
-def calc_province_distribution(df: pd.DataFrame = None, col: str = None) -> dict:
-    """区域样本分布统计（用于 44-区域分布地图）。"""
-    if isinstance(df, pd.DataFrame) and col and col in df.columns:
-        vc = df[col].dropna().astype(str).value_counts()
-        counts = {k: int(v) for k, v in vc.items()}
-    else:
-        counts = {
-            "安徽": 86, "江苏": 64, "上海": 41, "浙江": 38,
-            "湖北": 22, "广东": 18, "北京": 12, "四川": 9,
-            "山东": 6,  "河南": 4,
-        }
+def calc_province_distribution(df: pd.DataFrame, col: str = None) -> dict:
+    """
+    区域样本分布统计（用于 44-区域分布地图）。
+    严格只接收真实数据集中的省份/地域列，若数据中不含有效省份列则抛出异常（无内置假数据回退）。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("区域分布统计需要传入非空数据集。")
+    target_col = col if (col and col in df.columns) else detect_province_column(df)
+    if not target_col or target_col not in df.columns:
+        raise ValueError("当前数据集不包含可识别的省份/地域列，无法绘制区域分布地图。")
+
+    raw_s = df[target_col].dropna().astype(str).str.strip()
+    raw_s = raw_s[~raw_s.isin(["", "nan", "None"])]
+    mapped_s = raw_s.map(_normalize_province_name)
+    valid_s = mapped_s[mapped_s != ""]
+    if valid_s.empty:
+        raise ValueError(f"列「{target_col}」未匹配到有效的中国省份名称。")
+
+    vc = valid_s.value_counts()
+    counts = {str(k): int(v) for k, v in vc.items()}
     total = max(sum(counts.values()), 1)
     rows = [
         {"省份": k, "样本数": v, "占比(%)": round(v / total * 100.0, 1)}
@@ -2878,11 +3644,21 @@ def calc_province_distribution(df: pd.DataFrame = None, col: str = None) -> dict
     yrd_n = sum(counts.get(p, 0) for p in ["安徽", "江苏", "上海", "浙江"])
     yrd_pct = yrd_n / total * 100.0
     top1 = prov_df.iloc[0]
-    conclusion = (
-        f"区域分布显示：长三角四省市（皖苏沪浙）合计占样本 {yrd_pct:.0f}%（{yrd_n}/{total}），"
-        f"{top1['省份']}单省居首（n={top1['样本数']}，占 {top1['占比(%)']:.1f}%）。"
-    )
+    top3_names = "、".join(prov_df.head(3)["省份"].tolist())
+    top3_pct = float(prov_df.head(3)["占比(%)"].sum())
+
+    if yrd_pct >= 50.0:
+        conclusion = (
+            f"区域分布显示：{top1['省份']}样本量居首（n={top1['样本数']}，占 {top1['占比(%)']:.1f}%），"
+            f"长三角四省市（皖苏沪浙）合计占样本 {yrd_pct:.1f}%（{yrd_n}/{total}）。"
+        )
+    else:
+        conclusion = (
+            f"区域分布显示：{top1['省份']}样本量居首（n={top1['样本数']}，占 {top1['占比(%)']:.1f}%），"
+            f"前三大省份（{top3_names}）合计占样本 {top3_pct:.1f}%（共覆盖 {len(counts)} 个省区市）。"
+        )
     return {
+        "col": target_col,
         "counts": counts,
         "table": prov_df,
         "total": total,
@@ -2959,6 +3735,7 @@ def build_ppt_report(
     is_weighted: bool = False,
     theme_name: str = "暖纸杂志",
     df: pd.DataFrame = None,
+    export_options: dict = None,
 ) -> bytes:
     """委托 ppt_report.build_ppt_report 生成出版级 16:9 完整 PPT 演示报告 (.pptx)。"""
     import ppt_report as pr
@@ -2970,6 +3747,7 @@ def build_ppt_report(
         is_weighted=is_weighted,
         theme_name=theme_name,
         df=df,
+        export_options=export_options,
     )
 
 

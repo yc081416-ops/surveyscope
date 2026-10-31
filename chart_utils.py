@@ -148,15 +148,16 @@ def render_chart_by_id(
     df: pd.DataFrame,
     theme_name: str = DEFAULT_THEME_NAME,
     settings: dict = None,
-    is_demo: bool = True,
+    is_demo: bool = False,
+    **kwargs,
 ) -> dict:
-    """根据图表编号（如 '01-棒棒糖图' 或 '44-区域分布地图'）渲染并返回四件套字典。"""
+    """根据图表编号（如 '01-棒棒糖图' 或 '44-区域分布地图'）渲染并返回四件套字典，支持透传列名等参数。"""
     if chart_id not in CHART_FUNC_MAP:
         raise KeyError(f"未找到编号为 {chart_id} 的图表函数。")
     fn = CHART_FUNC_MAP[chart_id]
     _tok = set_active_chart_id(chart_id)
     try:
-        return fn(df, theme_name=theme_name, settings=settings, is_demo=is_demo)
+        return fn(df, theme_name=theme_name, settings=settings, is_demo=is_demo, **kwargs)
     finally:
         reset_active_chart_id(_tok)
 
@@ -165,7 +166,7 @@ def generate_all_49_charts(
     df: pd.DataFrame,
     theme_name: str = DEFAULT_THEME_NAME,
     settings_map: dict = None,
-    is_demo: bool = True,
+    is_demo: bool = False,
 ) -> dict:
     """一键批量生成全部 49 张样板图四件套字典，返回 {chart_id: bundle_dict}。"""
     results = {}

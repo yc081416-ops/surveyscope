@@ -288,7 +288,7 @@ _CACHE_PPTX_BYTES = None
 
 
 def _get_valid_demo_df():
-    df = su.generate_demo_coffee_data(seed=42, n=300)
+    df = su.generate_demo_coffee_data(seed=42, n=300, include_extended=True)
     qc = su.run_quality_control(
         df,
         straight_cols=["价格量表1_价格合理", "价格量表2_性价比高", "价格量表3_促销吸引", "品质量表1_口感醇厚", "品质量表2_豆源优质", "品质量表3_品质不稳定_反向"],
@@ -364,7 +364,8 @@ def check_S2():
 
 def check_S3():
     """S3 联合分析：OLS 效用值（属性内零中心化）与属性相对重要性之和 = 100.0%。"""
-    cj = su.calc_conjoint_analysis()
+    _, _, vdf = _get_valid_demo_df()
+    cj = su.calc_conjoint_analysis(vdf)
     imp_sum = cj["importance_sum"]
     util_df = cj["utility_df"]
     attr_sums = util_df.groupby("属性名称")["部分价值(Utility)"].sum().round(6).to_dict()
