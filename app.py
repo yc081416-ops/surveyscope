@@ -2159,3 +2159,5 @@ elif current_module == "报告导出":
                 key="dl_final_xlsx",
                 use_container_width=True,
             )
+
+# redeploy trigger 2026-10-31 (footnote cleanup + vector preview)
