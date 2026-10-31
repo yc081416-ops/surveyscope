@@ -454,9 +454,9 @@ def validate_and_apply_edits(
 
 def call_openai_compatible_llm(prompt: str, api_config: dict) -> str:
     """调用用户配置的 OpenAI 兼容大模型接口（只存 session_state，不落盘）。"""
-    base_url = api_config.get("base_url", "https://api.openai.com/v1").rstrip("/")
+    base_url = api_config.get("base_url", "https://api.deepseek.com").rstrip("/")
     api_key = api_config.get("api_key", "").strip()
-    model = api_config.get("model", "gpt-4o-mini").strip()
+    model = api_config.get("model", "deepseek-flash").strip()
     if not api_key:
         raise ValueError("尚未配置 API Key，请在左侧边栏「AI 改图接口设置」中填写。")
 

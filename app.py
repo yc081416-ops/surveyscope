@@ -103,9 +103,9 @@ def _init_session_state():
         "chart_history": {},
         "session_charts": {},
         "ai_config": {
-            "base_url": "https://api.openai.com/v1",
+            "base_url": "https://api.deepseek.com",
             "api_key": "",
-            "model": "gpt-4o-mini",
+            "model": "deepseek-flash",
         },
         "active_module": "数据概览",
         "last_ppt_bytes": None,
