@@ -478,13 +478,22 @@ def call_openai_compatible_llm(prompt: str, api_config: dict) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-        content = body["choices"][0]["message"]["content"].strip()
-        if content.startswith("```"):
-            lines = [ln for ln in content.splitlines() if not ln.strip().startswith("```")]
-            content = "\n".join(lines).strip()
-        return content
+    # 推理型模型偶发长耗时/连接抖动：传输类错误自动重试一次（HTTP 错误不重试，重试也不会变好）
+    last_exc = None
+    for _attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                content = body["choices"][0]["message"]["content"].strip()
+                if content.startswith("```"):
+                    lines = [ln for ln in content.splitlines() if not ln.strip().startswith("```")]
+                    content = "\n".join(lines).strip()
+                return content
+        except urllib.error.HTTPError:
+            raise
+        except Exception as e:
+            last_exc = e
+    raise last_exc
 
 
 def _local_rule_fallback(user_instruction: str) -> str:
