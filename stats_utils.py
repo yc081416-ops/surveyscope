@@ -46,10 +46,17 @@ from factor_analyzer.factor_analyzer import calculate_kmo, calculate_bartlett_sp
 # 模块一：数据上传与题型识别
 # ==============================================================================
 
-def load_survey_file(uploaded_file) -> pd.DataFrame:
-    """读取 CSV 或 Excel 问卷数据文件，自动处理中文编码，兼容问卷星导出格式。"""
-    if isinstance(uploaded_file, (str, bytes)):
-        if isinstance(uploaded_file, str):
+def load_survey_file(uploaded_file, filename=None) -> pd.DataFrame:
+    """读取 CSV 或 Excel 问卷数据文件，自动处理中文编码，兼容问卷星导出格式。
+
+    uploaded_file 可为：本地路径 str / Streamlit 上传文件对象 / 原始 bytes
+    （bytes 时用 filename 判断扩展名，app.py 的上传入口即此用法）。
+    """
+    if isinstance(uploaded_file, bytes):
+        _bio = io.BytesIO(uploaded_file)
+        _bio.name = filename or "data.csv"
+        uploaded_file = _bio
+    if isinstance(uploaded_file, str):
             if uploaded_file.lower().endswith((".xlsx", ".xls")):
                 return pd.read_excel(uploaded_file)
             _last_err = None
@@ -1686,6 +1693,52 @@ def compute_post_stratification_weights(
         "effective_n": float(round(n_eff, 2)),
         "conclusion": conclusion,
     }
+
+
+def compare_weighted_unweighted(df: pd.DataFrame, target_col: str, weight_col: str, is_numeric: bool = False) -> pd.DataFrame:
+    """
+    加权前后对比表（模块 09 使用）：
+    - 分类题：各类别未加权占比 vs 加权后占比（%）与变化（百分点），按未加权占比降序。
+    - 数值题：未加权 vs 加权后的均值与标准差（加权均值 Σwx/Σw，加权方差 Σw(x-x̄w)²/Σw）。
+    权重缺失按 1.0 处理；目标列缺失的行不纳入计算。
+    """
+    if target_col not in df.columns:
+        raise ValueError(f"数据中不存在题目列：{target_col}")
+    if weight_col in df.columns:
+        w_all = pd.to_numeric(df[weight_col], errors="coerce").fillna(1.0)
+    else:
+        w_all = pd.Series(1.0, index=df.index)
+
+    if is_numeric:
+        x = pd.to_numeric(df[target_col], errors="coerce")
+        mask = x.notna()
+        x, w = x[mask], w_all[mask]
+        if len(x) == 0 or float(w.sum()) == 0:
+            return pd.DataFrame([{"统计量": "均值", "未加权": np.nan, "加权后": np.nan, "变化": np.nan}])
+        mean_u = float(x.mean())
+        mean_w = float((x * w).sum() / w.sum())
+        sd_u = float(x.std(ddof=1)) if len(x) > 1 else 0.0
+        sd_w = float(((w * (x - mean_w) ** 2).sum() / w.sum()) ** 0.5)
+        return pd.DataFrame([
+            {"统计量": "均值", "未加权": round(mean_u, 2), "加权后": round(mean_w, 2), "变化": round(mean_w - mean_u, 2)},
+            {"统计量": "标准差", "未加权": round(sd_u, 2), "加权后": round(sd_w, 2), "变化": round(sd_w - sd_u, 2)},
+        ])
+
+    mask = df[target_col].notna()
+    s = df.loc[mask, target_col].astype(str)
+    w = w_all[mask]
+    total_w = float(w.sum())
+    rows = []
+    for cat, cnt in s.value_counts().items():
+        share_u = float(cnt) / len(s) * 100.0 if len(s) > 0 else 0.0
+        share_w = float(w[s == cat].sum()) / total_w * 100.0 if total_w > 0 else 0.0
+        rows.append({
+            "类别": cat,
+            "未加权占比(%)": round(share_u, 2),
+            "加权后占比(%)": round(share_w, 2),
+            "变化(百分点)": round(share_w - share_u, 2),
+        })
+    return pd.DataFrame(rows)
 
 
 # ==============================================================================

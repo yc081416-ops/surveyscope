@@ -332,13 +332,13 @@ if current_module.startswith("01"):
     c_left, c_right = st.columns(2)
     with c_left:
         st.subheader("📋 自动识别题型与统计口径一览")
-        st.dataframe(pd.DataFrame(qtypes), use_container_width=True)
+        st.dataframe(pd.DataFrame({"题目": list(qtypes.keys()), "自动识别题型": list(qtypes.values())}), use_container_width=True, hide_index=True)
     with c_right:
         st.subheader("🔍 各题缺失值与完整率统计")
         st.dataframe(ov["missing_df"], use_container_width=True)
 
     st.subheader("👀 原始问卷数据前 20 行预览")
-    st.dataframe(ov["preview_df"], use_container_width=True)
+    st.dataframe(raw_df.head(20), use_container_width=True)
 
 elif current_module.startswith("02"):
     st.header("02 · 数据质控与异常样本清洗")
@@ -426,9 +426,9 @@ elif current_module.startswith("09"):
     wt_res = su.compute_post_stratification_weights(valid_df["性别"], {"男": target_m, "女": target_f})
     with c2:
         st.markdown(f'<div class="conclusion-banner">📌 {wt_res["conclusion"]}</div>', unsafe_allow_html=True)
-        st.dataframe(wt_res["weight_table"], use_container_width=True)
+        st.dataframe(wt_res["table"], use_container_width=True)
 
-    valid_df["_weight"] = wt_res["weights"]
+    valid_df["_weight"] = wt_res["weight_series"]
     cmp_freq = su.compare_weighted_unweighted(valid_df, "消费频次", "_weight", is_numeric=False)
     cmp_spend = su.compare_weighted_unweighted(valid_df, "月消费额", "_weight", is_numeric=True)
     st.subheader("📊 加权前后关键题目对比表")
