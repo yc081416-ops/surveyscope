@@ -270,6 +270,16 @@ def finalize_chart_chrome(
     final_title = str(cfg.get("title") or title)
     final_subtitle = str(cfg.get("subtitle") or subtitle)
     final_footnote = str(cfg.get("footnote") or footnote)
+    # 产品要求：脚注不写数据来源——统一在此剔除「数据来源：…」分段，
+    # 覆盖全部图型（含 AI 编辑传入的脚注），其余统计口径/检验信息保留。
+    if "数据来源" in final_footnote:
+        _segs = [s.strip() for s in final_footnote.split("|")]
+        _segs = [
+            s
+            for s in _segs
+            if s and not re.match(r"^数据来源\s*[:：]", s)
+        ]
+        final_footnote = " | ".join(_segs)
 
     if not cfg.get("for_ppt"):
         # 第 1 层：顶部口径副标题
@@ -410,6 +420,24 @@ def export_chart_bundle(
     svg_str = _enhance_svg_text(svg_str, chart_id)
     svg_bytes = svg_str.encode("utf-8")
 
+    # 2b. 显示专用预览 SVG（文字转路径，不依赖观看者本地字体）：页面预览走矢量，
+    #     在高分屏/浏览器缩放下保持锐利；下载版 SVG 仍保留 <text> 可编辑节点，互不影响。
+    preview_svg_bytes = b""
+    try:
+        import matplotlib as _mpl
+
+        with _mpl.rc_context({"svg.fonttype": "path"}):
+            prev_buf = io.BytesIO()
+            fig.savefig(
+                prev_buf,
+                format="svg",
+                facecolor=t["bg_canvas"],
+                edgecolor="none",
+            )
+            preview_svg_bytes = prev_buf.getvalue()
+    except Exception:
+        preview_svg_bytes = b""
+
     # 3. 导出源数据 CSV
     if source_df is None or source_df.empty:
         source_df = pd.DataFrame([{"指标": chart_name, "数值": 1}])
@@ -444,6 +472,7 @@ def export_chart_bundle(
         "conclusion": final_title,
         "png_bytes": png_bytes,
         "svg_bytes": svg_bytes,
+        "preview_svg_bytes": preview_svg_bytes,
         "csv_bytes": csv_bytes,
         "pdf_bytes": pdf_bytes,
         "pdf_deferred": pdf_deferred,

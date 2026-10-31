@@ -390,7 +390,13 @@ def render_interactive_chart_card(
         f'</div>',
         unsafe_allow_html=True,
     )
-    st.image(bundle["png_bytes"], use_container_width=True)
+    _preview_svg = bundle.get("preview_svg_bytes") or b""
+    if _preview_svg and len(_preview_svg) <= 900_000:
+        # 矢量预览：任意缩放与高分屏下不发虚（下载仍提供 PNG/SVG/CSV/PDF 四件套）。
+        # 注意：st.image 识别 SVG 靠字符串入参，传 bytes 会被当位图走 PIL 而报错。
+        st.image(_preview_svg.decode("utf-8", errors="replace"), use_container_width=True)
+    else:
+        st.image(bundle["png_bytes"], use_container_width=True)
     render_conclusion_box("统计发现", bundle["conclusion"])
 
     c1, c2, c3, c4 = st.columns(4)
