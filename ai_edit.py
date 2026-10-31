@@ -136,7 +136,7 @@ def build_ai_edit_prompt(
 3. set_footnote: {{"action": "set_footnote", "value": "新脚注（口径注）文本"}}
 4. highlight: {{"action": "highlight", "target": "某类别名称"}} (将该类别设为高亮深红 #A50026)
 5. set_item_color: {{"action": "set_item_color", "target": "某类别名称", "value": "#RRGGBB"}} (把指定类别改成指定颜色；用户说颜色名时填对应十六进制：绿色 #2E6B57 / 红色 #A50026 / 蓝色 #88CCEE / 紫色 #AA4499 / 橙色 #C4664A)
-6. color_scheme: {{"action": "color_scheme", "value": {_scheme_enum}}}（期刊色、色盲友好与艺术家命名色板；用户说"高级/换个配色"而未指定时默认选 "Tol Muted"，说出具体名字如北斋/莫奈/NPG 时选对应方案）
+6. color_scheme: {{"action": "color_scheme", "value": {_scheme_enum}}}（期刊色、色盲友好与艺术家命名色板；用户说"高级/换个配色"而未指定时默认选 "Tol Muted"；说出艺术家或期刊名如北斋、莫奈、NPG 时，选名称中包含该词的方案）
 7. custom_main_color: {{"action": "custom_main_color", "value": "#RRGGBB"}}
 8. toggle_labels: {{"action": "toggle_labels", "value": true | false}}
 9. toggle_legend: {{"action": "toggle_legend", "value": true | false}}
@@ -588,12 +588,14 @@ def _local_rule_fallback(user_instruction: str) -> str:
         return json.dumps({"action": "top_n", "value": int(m_top.group(1))}, ensure_ascii=False)
     # 整体配色/色板切换（放在最后：更具体的单类改色规则已在上方优先处理）
     if "配色" in txt or "色板" in txt:
-        for _kw, _scheme in [("北斋", "北斋海色"), ("梵高", "梵高绿野"), ("希腊", "希腊陶土"),
-                             ("卡萨特", "卡萨特茶色"), ("莫奈", "莫奈睡莲"), ("雷诺阿", "雷诺阿舞会"),
-                             ("色盲", "Okabe-Ito 色盲友好"), ("柳叶刀", "柳叶刀 Lancet"),
-                             ("NPG", "NPG 自然"), ("AAAS", "AAAS 期刊"), ("Bright", "Tol Bright")]:
+        for _kw, _frag in [("北斋", "Hokusai"), ("梵高", "VanGogh"), ("希腊", "Greek"),
+                           ("卡萨特", "Cassatt"), ("莫奈", "Monet"), ("雷诺阿", "Renoir"),
+                           ("色盲", "Okabe-Ito"), ("柳叶刀", "Lancet"),
+                           ("NPG", "NPG"), ("AAAS", "AAAS"), ("Bright", "Tol Bright")]:
             if _kw in txt:
-                return json.dumps({"action": "color_scheme", "value": _scheme}, ensure_ascii=False)
+                for _opt in _color_scheme_options():
+                    if _frag in _opt:
+                        return json.dumps({"action": "color_scheme", "value": _opt}, ensure_ascii=False)
         if "绿" in txt:
             return json.dumps({"action": "color_scheme", "value": "松绿序渐"}, ensure_ascii=False)
         if "发散" in txt:

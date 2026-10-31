@@ -499,6 +499,28 @@ def render_interactive_chart_card(
                     index=pal_opts.index(curr_pal) if curr_pal in pal_opts else 0,
                     key=f"fmt_pal_{slot_key}",
                 )
+                # 色卡预览：先看色再选，不用记配色名
+                try:
+                    from theme import resolve_effective_theme as _ret2
+                    from chart_palettes import NAMED_SCHEME_SOURCES as _pal_src
+
+                    _eff = _ret2(
+                        st.session_state["theme_name"],
+                        {"color_scheme": None if new_palette == "主题默认" else new_palette},
+                    )
+                    _swatches = "".join(
+                        f'<span style="display:inline-block;width:22px;height:14px;border-radius:3px;'
+                        f'margin-right:3px;border:1px solid rgba(0,0,0,0.12);background:{_c};"></span>'
+                        for _c in _eff["categorical"][:12]
+                    )
+                    _src_note = _pal_src.get(new_palette, "")
+                    st.markdown(
+                        f'<div style="margin:2px 0 2px 0;">{_swatches}</div>'
+                        + (f'<div style="font-size:12px;opacity:0.75;">出处：{_src_note}</div>' if _src_note else ""),
+                        unsafe_allow_html=True,
+                    )
+                except Exception:
+                    pass
             with fc2:
                 sort_opts = ["desc", "asc", "original"]
                 sort_labels = {"desc": "按数值降序", "asc": "按数值升序", "original": "保持原始顺序"}

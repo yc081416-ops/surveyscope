@@ -265,12 +265,13 @@ def get_chart_palette_override(chart_id: str, theme_name: str = None):
 
 
 # =============================================================================
-# 命名配色方案注册表（AI 改图 color_scheme 与格式面板「单图配色覆盖」共用）
+# 命名配色方案注册表（格式面板「单图配色覆盖」与 AI 改图 color_scheme 共用）
 # - 期刊/色盲友好色值逐一核对自公开来源（2026-10-31）：
 #   ggsci（GitHub: nanxstats/ggsci, R/palettes.R）的 NPG / AAAS / Lancet；
 #   Okabe-Ito（GitHub: clauswilke/colorblindr, R/palettes.R，黑版配色）；
 #   Tol Bright（Paul Tol 官方配色页 Bright 定性方案，默认色序）。
-# - 艺术系列直接引用上方 CHART_PALETTES 的逐图色板（MetBrewer），不重复维护色值。
+# - 全部 50 套逐图专属色板（MetBrewer / Crameri / ggsci）自动注册为可选方案：
+#   任何图都可以换用任何一套，名称取自色板出处（如「Hokusai2 · 葛饰北斋」）。
 # =============================================================================
 NAMED_COLOR_SCHEMES = {
     "NPG 自然": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85"],
@@ -278,13 +279,36 @@ NAMED_COLOR_SCHEMES = {
     "柳叶刀 Lancet": ["#00468B", "#ED0000", "#42B540", "#0099B4", "#925E9F", "#FDAF91", "#AD002A", "#ADB6B6", "#1B1919"],
     "Okabe-Ito 色盲友好": ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"],
     "Tol Bright": ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB"],
-    "北斋海色": list(CHART_PALETTES["01-棒棒糖图"]["categorical"]),
-    "梵高绿野": list(CHART_PALETTES["02-水平条形图"]["categorical"]),
-    "希腊陶土": list(CHART_PALETTES["03-帕累托图"]["categorical"]),
-    "卡萨特茶色": list(CHART_PALETTES["05-甜甜圈图"]["categorical"]),
-    "莫奈睡莲": list(CHART_PALETTES["06-多选题条形图"]["categorical"]),
-    "雷诺阿舞会": list(CHART_PALETTES["14-人口学金字塔"]["categorical"]),
 }
 
-# color_scheme 全部可选项（主题默认 + 主题层既有 3 方案 + 命名注册表），AI 与手动面板共用
+NAMED_SCHEME_SOURCES = {
+    "NPG 自然": "ggsci · NPG（Nature 期刊组）",
+    "AAAS 期刊": "ggsci · AAAS（美国科学促进会期刊）",
+    "柳叶刀 Lancet": "ggsci · Lancet（柳叶刀）",
+    "Okabe-Ito 色盲友好": "Okabe-Ito 色盲友好 8 色",
+    "Tol Bright": "Paul Tol · Bright（色盲安全）",
+}
+
+
+def _scheme_display_name(source):
+    """'MetBrewer · Hokusai2（葛饰北斋《神奈川冲浪里》海色）' -> 'Hokusai2 · 葛饰北斋'"""
+    try:
+        core = source.split("·", 1)[1].strip()
+    except Exception:
+        return source
+    en = core.split("（", 1)[0].strip()
+    cn = ""
+    if "（" in core:
+        inside = core.split("（", 1)[1].rstrip("）")
+        cn = inside.split("《", 1)[0].split("，", 1)[0].split("、", 1)[0].strip()
+    return f"{en} · {cn}" if cn else en
+
+
+for _cid, _entry in CHART_PALETTES.items():
+    _name = _scheme_display_name(_entry.get("source", _cid))
+    if _name not in NAMED_COLOR_SCHEMES:
+        NAMED_COLOR_SCHEMES[_name] = list(_entry["categorical"])
+        NAMED_SCHEME_SOURCES[_name] = _entry.get("source", "")
+
+# color_scheme 全部可选项（主题默认 + 主题层既有 3 方案 + 命名注册表），手动面板与 AI 共用
 COLOR_SCHEME_OPTIONS = ["主题默认", "Tol Muted", "松绿序渐", "BrBG发散"] + list(NAMED_COLOR_SCHEMES.keys())
