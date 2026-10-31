@@ -310,6 +310,55 @@ def get_sequential_cmap(theme=None):
     return mcolors.LinearSegmentedColormap.from_list("theme_sequential", t["sequential_6"], N=256)
 
 
+def _mix_hex(hex_a: str, hex_b: str, frac: float) -> str:
+    """两色线性混合：frac=0 取 hex_a，frac=1 取 hex_b。"""
+    a = mcolors.to_rgb(hex_a)
+    b = mcolors.to_rgb(hex_b)
+    return mcolors.to_hex(tuple(a[i] + (b[i] - a[i]) * frac for i in range(3)))
+
+
+def _apply_scheme_family(t: dict, colors) -> None:
+    """把一套命名配色派生为完整令牌族（就地修改 t）。
+
+    只改 categorical 时，主色驱动的图（帕累托/散点/ROC 等）、序渐与发散色标
+    驱动的图（热力图/地图/Likert 等）对换配色毫无反应；故由色板首色派生
+    main 家族与 sequential_6、由首尾两色派生 diverging，保证全图型一致响应。
+    """
+    cols = [c for c in (colors or []) if isinstance(c, str) and c.startswith("#")]
+    if not cols:
+        return
+    t["categorical"] = list(cols)
+    base = cols[0]
+    second = cols[1] if len(cols) > 1 else base
+    last = cols[-1] if len(cols) > 2 else second
+    white, black = "#FFFFFF", "#000000"
+    t["main"] = base
+    t["main_dark"] = _mix_hex(base, black, 0.30)
+    t["main_light"] = _mix_hex(base, white, 0.45)
+    t["main_pale"] = _mix_hex(base, white, 0.84)
+    t["accent"] = second
+    t["accent_primary"] = base
+    t["accent_secondary"] = second
+    if t.get("is_dark"):
+        t["sequential_6"] = [
+            _mix_hex(base, black, 0.55), _mix_hex(base, black, 0.35), _mix_hex(base, black, 0.15),
+            base, _mix_hex(base, white, 0.30), _mix_hex(base, white, 0.55),
+        ]
+        center = "#2E3542"
+    else:
+        t["sequential_6"] = [
+            _mix_hex(base, white, 0.88), _mix_hex(base, white, 0.66), _mix_hex(base, white, 0.40),
+            _mix_hex(base, white, 0.14), base, _mix_hex(base, black, 0.26),
+        ]
+        center = "#F7F5F0"
+    t["diverging"] = [
+        _mix_hex(base, black, 0.30), base, _mix_hex(base, white, 0.32), _mix_hex(base, white, 0.62),
+        _mix_hex(base, white, 0.86), center,
+        _mix_hex(last, white, 0.86), _mix_hex(last, white, 0.62), _mix_hex(last, white, 0.32),
+        last, _mix_hex(last, black, 0.30),
+    ]
+
+
 def resolve_effective_theme(theme_name: str = None, settings: dict = None) -> dict:
     """合并主题默认令牌、逐图色板（若开启）与格式面板显式设置。"""
     t = get_theme(theme_name)
@@ -335,17 +384,17 @@ def resolve_effective_theme(theme_name: str = None, settings: dict = None) -> di
             t["diverging"][7], t["diverging"][3], t["main"], t["accent"], t["highlight"],
         ]
     elif scheme in ("Tol Muted", "muted"):
-        t["categorical"] = [
+        _apply_scheme_family(t, [
             "#332288", "#117733", "#44AA99", "#88CCEE", "#DDCC77",
             "#CC6677", "#AA4499", "#882255", "#999999",
-        ]
+        ])
     elif scheme:
         # 命名配色注册表（期刊色 / 色盲友好 / MetBrewer 艺术系列），AI 与手动面板共用
         try:
             from chart_palettes import NAMED_COLOR_SCHEMES
 
             if scheme in NAMED_COLOR_SCHEMES:
-                t["categorical"] = list(NAMED_COLOR_SCHEMES[scheme])
+                _apply_scheme_family(t, NAMED_COLOR_SCHEMES[scheme])
         except Exception:
             pass
 

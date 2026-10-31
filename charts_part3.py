@@ -345,7 +345,7 @@ def chart_42_confusion_matrix(
 
     fig, ax, t, cfg = create_themed_figure(theme_name, settings, rect=[0.18, 0.16, 0.64, 0.62])
     fs = float(cfg["font_scale"])
-    cmap = get_sequential_cmap(theme_name)
+    cmap = get_sequential_cmap(t)
     im = ax.imshow(row_pct, cmap=cmap, vmin=0, vmax=100, aspect="auto")
 
     cell_tags = [["真阴性 (TN)", "假阳性 (FP)"], ["假阴性 (FN)", "真阳性 (TP)"]]
@@ -607,7 +607,7 @@ def chart_44_region_map(df: pd.DataFrame = None, col: str = None, theme_name: st
     )
     fs = float(cfg["font_scale"])
 
-    cmap = get_sequential_cmap(theme_name)
+    cmap = get_sequential_cmap(t)
     max_cnt = max(counts.values()) if counts else 0
     bins_spec = _build_map_bins(max_cnt, cmap)
 

@@ -157,7 +157,7 @@ def chart_26_corr_heatmap(df: pd.DataFrame, cols: list = None, theme_name: str =
         for j in range(i + 1, len(short_names)):
             masked[i, j] = np.nan
 
-    cmap = get_diverging_cmap(theme_name)
+    cmap = get_diverging_cmap(t)
     cmap.set_bad(color=t["bg_canvas"])
     im = ax.imshow(masked, cmap=cmap, vmin=-1.0, vmax=1.0, aspect="auto")
 
@@ -231,7 +231,7 @@ def chart_27_bubble_matrix(df: pd.DataFrame, cols: list = None, theme_name: str 
 
     fig, ax, t, cfg = create_themed_figure(theme_name, settings, rect=[0.14, 0.16, 0.76, 0.64])
     fs = float(cfg["font_scale"])
-    cmap = get_diverging_cmap(theme_name)
+    cmap = get_diverging_cmap(t)
 
     k = len(names)
     max_off = 0.0

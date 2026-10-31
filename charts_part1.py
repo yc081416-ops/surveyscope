@@ -1219,7 +1219,7 @@ def chart_18_chi2_residual_heatmap(df: pd.DataFrame, row_col: str = "年龄段",
     fs = float(cfg["font_scale"])
 
     mat = resid_df.to_numpy(dtype=float)
-    cmap = get_diverging_cmap(theme_name)
+    cmap = get_diverging_cmap(t)
     vmax = max(2.5, float(np.max(np.abs(mat))))
     im = ax.imshow(mat, cmap=cmap, vmin=-vmax, vmax=vmax, aspect="auto")
 
