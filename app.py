@@ -128,6 +128,68 @@ set_use_chart_palettes(st.session_state["use_chart_palettes"])
 
 
 # ==============================================================================
+# 性能缓存层（2026-10-31）：Streamlit 每次交互都重跑整个脚本，以下纯计算按
+# 参数内容哈希缓存，避免每次点击都重算题型识别 / 质控 / 能力探测 / 图表渲染。
+# 带下划线前缀的参数不参与哈希、原样透传，保证缓存键稳定且语义不变。
+# ==============================================================================
+def _freeze(obj):
+    """把 dict/list/DataFrame 等参数冻结为可哈希键（仅作缓存键，不改变真实入参）。"""
+    if isinstance(obj, dict):
+        return tuple(sorted((str(k), _freeze(v)) for k, v in obj.items()))
+    if isinstance(obj, (list, tuple)):
+        return tuple(_freeze(x) for x in obj)
+    if isinstance(obj, (pd.DataFrame, pd.Series)):
+        import hashlib
+        h = pd.util.hash_pandas_object(obj, index=True).values
+        return ("__df__", obj.shape, hashlib.md5(h.tobytes()).hexdigest())
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return repr(obj)
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_auto_qtypes(df: pd.DataFrame):
+    return su.auto_detect_question_types(df)
+
+
+@st.cache_data(max_entries=16, show_spinner=False)
+def _cached_caps(df: pd.DataFrame, qtypes_key, _qtypes):
+    return su.detect_dataset_capabilities(df, _qtypes)
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_qc(df, check_dup, check_straight, straight_cols, check_speed,
+               duration_col, min_seconds, remove_flagged):
+    return su.run_quality_control(
+        df,
+        check_dup=check_dup,
+        check_straight=check_straight,
+        straight_cols=list(straight_cols),
+        check_speed=check_speed,
+        duration_col=duration_col,
+        min_seconds=min_seconds,
+        remove_flagged=remove_flagged,
+    )
+
+
+@st.cache_data(max_entries=32, show_spinner=False)
+def _cached_chart_bundle(chart_id, df_input, theme_name, use_palettes,
+                         settings_key, kwargs_key, _settings, _kwargs):
+    return cu.render_chart_by_id(
+        chart_id,
+        df_input,
+        theme_name=theme_name,
+        settings=_settings,
+        **_kwargs,
+    )
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_theme_css(theme_name):
+    return build_streamlit_theme_css(theme_name)
+
+
+# ==============================================================================
 # 文件解析与状态管理辅助函数（带可读中文错误诊断，杜绝暴露原始异常栈）
 # ==============================================================================
 def _friendly_parse_error(exc: Exception, filename: str) -> str:
@@ -289,12 +351,15 @@ def render_interactive_chart_card(
 
     try:
         with st.spinner("正在按当前主题绘制出版级矢量图表..."):
-            bundle = cu.render_chart_by_id(
+            bundle = _cached_chart_bundle(
                 chart_id,
                 df_input,
-                theme_name=st.session_state["theme_name"],
-                settings=curr_settings,
-                **chart_kwargs,
+                st.session_state["theme_name"],
+                bool(st.session_state["use_chart_palettes"]),
+                _freeze(curr_settings),
+                _freeze(chart_kwargs),
+                curr_settings,
+                chart_kwargs,
             )
     except Exception as exc:
         render_error_state(
@@ -601,7 +666,7 @@ with st.sidebar:
 
 
 # 注入全站级主题 CSS（覆盖主画布、侧边栏、数据表、控件与业务组件）
-st.markdown(build_streamlit_theme_css(st.session_state["theme_name"]), unsafe_allow_html=True)
+st.markdown(_cached_theme_css(st.session_state["theme_name"]), unsafe_allow_html=True)
 
 
 # ==============================================================================
@@ -734,32 +799,32 @@ if st.session_state["raw_df"] is None:
 # 分支二：已上传数据 — 自适应质控、能力探测与正式分析工作台
 # ==============================================================================
 raw_df = st.session_state["raw_df"]
-auto_qtypes = su.auto_detect_question_types(raw_df)
+auto_qtypes = _cached_auto_qtypes(raw_df)
 effective_qtypes = dict(auto_qtypes)
 for col_k, override_t in st.session_state["qtypes_override"].items():
     if col_k in effective_qtypes:
         effective_qtypes[col_k] = override_t
 
-raw_caps = su.detect_dataset_capabilities(raw_df, effective_qtypes)
+raw_caps = _cached_caps(raw_df, _freeze(effective_qtypes), effective_qtypes)
 dur_col = raw_caps["duration_col"]
 straight_cands = raw_caps["scale_cols"]
 
 qcp = st.session_state["qc_params"]
-qc_res = su.run_quality_control(
+qc_res = _cached_qc(
     raw_df,
-    check_dup=bool(qcp["check_dup"]),
-    check_straight=bool(qcp["check_straight"]),
-    straight_cols=straight_cands,
-    check_speed=bool(qcp["check_speed"]),
-    duration_col=dur_col,
-    min_seconds=float(qcp["min_seconds"]),
-    remove_flagged=bool(qcp["remove_flagged"]),
+    bool(qcp["check_dup"]),
+    bool(qcp["check_straight"]),
+    tuple(straight_cands),
+    bool(qcp["check_speed"]),
+    dur_col,
+    float(qcp["min_seconds"]),
+    bool(qcp["remove_flagged"]),
 )
 valid_df = qc_res["valid_df"].copy()
 if valid_df.empty:
     valid_df = raw_df.copy()
 
-caps = su.detect_dataset_capabilities(valid_df, effective_qtypes)
+caps = _cached_caps(valid_df, _freeze(effective_qtypes), effective_qtypes)
 sm = caps["special_models"]
 manual_ipa_available = (not sm["ipa"]["enabled"]) and (len(caps["scale_cols"]) >= 4)
 has_special_nav = bool(caps["modules"]["special_models"] or manual_ipa_available)
