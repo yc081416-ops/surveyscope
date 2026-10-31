@@ -474,11 +474,11 @@ def call_openai_compatible_llm(prompt: str, api_config: dict) -> str:
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {str(api_key).strip()}",
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         body = json.loads(resp.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"].strip()
         if content.startswith("```"):
