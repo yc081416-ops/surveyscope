@@ -348,6 +348,9 @@ def render_interactive_chart_card(
 ):
     slot_key = instance_key or chart_id
     curr_settings = st.session_state["chart_settings"].get(slot_key, {})
+    # 展示渲染延迟生成矢量 PDF（最慢的一件），点「生成矢量 PDF」时再补齐
+    disp_settings = dict(curr_settings)
+    disp_settings["defer_pdf"] = True
 
     try:
         with st.spinner("正在按当前主题绘制出版级矢量图表..."):
@@ -356,9 +359,9 @@ def render_interactive_chart_card(
                 df_input,
                 st.session_state["theme_name"],
                 bool(st.session_state["use_chart_palettes"]),
-                _freeze(curr_settings),
+                _freeze(disp_settings),
                 _freeze(chart_kwargs),
-                curr_settings,
+                disp_settings,
                 chart_kwargs,
             )
     except Exception as exc:
@@ -419,14 +422,47 @@ def render_interactive_chart_card(
             use_container_width=True,
         )
     with c4:
-        st.download_button(
-            "下载矢量 PDF",
-            data=bundle["pdf_bytes"],
-            file_name=f"{slot_key}.pdf",
-            mime="application/pdf",
-            key=f"dl_pdf_{slot_key}",
-            use_container_width=True,
+        pdf_sig = repr((
+            st.session_state.get("upload_sig"),
+            chart_id,
+            st.session_state["theme_name"],
+            _freeze(curr_settings),
+            _freeze(chart_kwargs),
+        ))
+        pdf_stash = st.session_state.get("pdf_stash", {}).get(slot_key)
+        pdf_ready = bundle.get("pdf_bytes") or (
+            pdf_stash[1] if pdf_stash and pdf_stash[0] == pdf_sig else None
         )
+        if pdf_ready:
+            st.download_button(
+                "下载矢量 PDF",
+                data=pdf_ready,
+                file_name=f"{slot_key}.pdf",
+                mime="application/pdf",
+                key=f"dl_pdf_{slot_key}",
+                use_container_width=True,
+            )
+        elif st.button(
+            "生成矢量 PDF",
+            key=f"gen_pdf_{slot_key}",
+            use_container_width=True,
+        ):
+            with st.spinner("正在生成矢量 PDF（单次生成，后续可直接下载）..."):
+                full_bundle = _cached_chart_bundle(
+                    chart_id,
+                    df_input,
+                    st.session_state["theme_name"],
+                    bool(st.session_state["use_chart_palettes"]),
+                    _freeze(curr_settings),
+                    _freeze(chart_kwargs),
+                    curr_settings,
+                    chart_kwargs,
+                )
+            st.session_state.setdefault("pdf_stash", {})[slot_key] = (
+                pdf_sig,
+                full_bundle["pdf_bytes"],
+            )
+            st.rerun()
 
     with st.expander(f"图表格式微调、AI 自然语言样式助手与绘图源数据 — {chart_id}", expanded=False):
         tab_fmt, tab_ai, tab_data = st.tabs(["手动格式调整", "AI 样式改图", "源数据表"])

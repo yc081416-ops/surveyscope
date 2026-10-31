@@ -1564,15 +1564,15 @@ def chart_23_ridgeline(df: pd.DataFrame, group_col: str = "消费频次", num_co
         modes.append(float(xg[int(np.argmax(dens))]))
         base_y = float(idx)
         c = get_item_color(g, t["categorical"][idx % len(t["categorical"])], t, cfg)
-        ax.fill_between(xg, base_y, base_y + dens_norm, color=c, alpha=0.58, zorder=10 - idx)
-        ax.plot(xg, base_y + dens_norm, color=t["bg_canvas"], linewidth=2.2, zorder=11 - idx)
-        ax.plot(xg, base_y + dens_norm, color=c, linewidth=1.5, zorder=12 - idx)
+        ax.fill_between(xg, base_y, base_y + dens_norm, color=c, alpha=0.72, zorder=10 - idx)
+        ax.plot(xg, base_y + dens_norm, color=t["bg_canvas"], linewidth=3.0, zorder=11 - idx)
+        ax.plot(xg, base_y + dens_norm, color=c, linewidth=2.0, zorder=12 - idx)
 
         m_v = float(np.mean(vals))
         med_v = float(np.median(vals))
         ax.vlines(m_v, base_y, base_y + kde(m_v)[0] / dens.max() * 0.78, color=t["accent_secondary"], linestyle="--", linewidth=1.6, zorder=13)
         if cfg["show_labels"]:
-            ax.text(xg[-1] - val_span * 0.02, base_y + 0.18, f"均值 {m_v:.1f}{u_nosp} (n={len(vals)})", ha="right", va="bottom", fontsize=9.4 * fs, color=t["text_primary"], weight="bold")
+            ax.text(xg[-1] - val_span * 0.02, base_y + 0.18, f"均值 {m_v:.1f}{u_nosp} (n={len(vals)})", ha="right", va="bottom", fontsize=10.6 * fs, color=t["text_primary"], weight="bold")
         rows.append({"分组": g, "样本数": len(vals), f"均值{u_col_sfx}": round(m_v, 2), f"中位数{u_col_sfx}": round(med_v, 2)})
 
     ax.set_yticks(range(len(groups)))
@@ -1582,9 +1582,24 @@ def chart_23_ridgeline(df: pd.DataFrame, group_col: str = "消费频次", num_co
     ax.spines["left"].set_visible(False)
 
     src = pd.DataFrame(rows[::-1])
-    _band = f"{min(modes):.1f}–{max(modes):.1f}" if (modes and val_span < 20) else (f"{min(modes):.0f}–{max(modes):.0f}" if modes else "—")
     band_sfx = f" {u}区间" if u else " 区间"
-    title = f"山脊密度演进：各{group_col}层级的{num_col}主峰分布于 {_band}{band_sfx}"
+    if modes:
+        _lo, _hi = min(modes), max(modes)
+        if val_span < 20:
+            _band_txt = (
+                f"主峰均落在 {_lo:.1f} 附近"
+                if abs(_hi - _lo) < 0.05
+                else f"主峰分布于 {_lo:.1f}–{_hi:.1f}{band_sfx}"
+            )
+        else:
+            _band_txt = (
+                f"主峰均落在 {_lo:.0f} 附近"
+                if abs(_hi - _lo) < 0.5
+                else f"主峰分布于 {_lo:.0f}–{_hi:.0f}{band_sfx}"
+            )
+    else:
+        _band_txt = "密度分布"
+    title = f"山脊密度演进：各{group_col}层级的{num_col}{_band_txt}"
     subtitle = f"{group_col} × {num_col}多组核密度叠嶂对比 | 山脊图 Ridgeline（n = {len(sub)}）"
     demo_tag = "模拟数据，仅供演示" if is_demo else "实测问卷数据"
     footnote = f"虚线标记：各组样本算术均值位置 | 数据来源：{demo_tag}"

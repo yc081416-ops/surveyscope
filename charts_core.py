@@ -415,9 +415,12 @@ def export_chart_bundle(
         source_df = pd.DataFrame([{"指标": chart_name, "数值": 1}])
     csv_bytes = source_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
-    # 4. 导出矢量 PDF（按需生成）
+    # 4. 导出矢量 PDF（按需生成）：展示路径可通过 settings["defer_pdf"]=True 延迟，
+    #    避免每次切换图型都支付 CJK 字体嵌入 PDF 的高额渲染成本（实测约占导出总耗时 3/4）；
+    #    用户点「生成矢量 PDF」时再以不带 defer 的 settings 补出完整四件套。
+    pdf_deferred = bool(include_pdf and (settings or {}).get("defer_pdf"))
     pdf_bytes = b""
-    if include_pdf:
+    if include_pdf and not pdf_deferred:
         pdf_buf = io.BytesIO()
         fig.savefig(
             pdf_buf,
@@ -443,6 +446,7 @@ def export_chart_bundle(
         "svg_bytes": svg_bytes,
         "csv_bytes": csv_bytes,
         "pdf_bytes": pdf_bytes,
+        "pdf_deferred": pdf_deferred,
         "source_df": source_df,
         "table": source_df,
         "theme_name": theme_name,
