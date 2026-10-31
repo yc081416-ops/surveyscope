@@ -695,7 +695,7 @@ with st.sidebar:
     theme_options = list(THEMES.keys())
     curr_theme_idx = theme_options.index(st.session_state["theme_name"]) if st.session_state["theme_name"] in theme_options else 0
     selected_theme = st.selectbox(
-        "全局视觉主题",
+        "主题切换",
         options=theme_options,
         index=curr_theme_idx,
         key="sb_theme_selector",
@@ -706,14 +706,8 @@ with st.sidebar:
         st.session_state["last_word_bytes"] = None
 
     active_t = get_theme(st.session_state["theme_name"], apply_chart_palette=False)
-    swatches = "".join([
-        f'<span style="display:inline-block;width:16px;height:16px;border-radius:4px;margin-right:4px;'
-        f'background:{c};border:1px solid {active_t["grid"]};vertical-align:middle;"></span>'
-        for c in [active_t["bg_canvas"], active_t["main"], active_t["accent"]] + active_t["categorical"][:4]
-    ])
     st.markdown(
-        f'<div style="margin:4px 0 8px 0;">{swatches}</div>'
-        f'<div class="ss-caption" style="margin-bottom:8px;">{html.escape(active_t["description"])}</div>',
+        f'<div class="ss-caption" style="margin:2px 0 8px 0;">{html.escape(active_t["description"])}</div>',
         unsafe_allow_html=True,
     )
 
