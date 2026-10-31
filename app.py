@@ -339,6 +339,7 @@ def render_conclusion_box(label: str, text: str):
 # ==============================================================================
 # 统一交互式图表容器（四件套导出 + 手动格式面板 + 17 动作 AI 样式助手）
 # ==============================================================================
+@st.fragment
 def render_interactive_chart_card(
     chart_id: str,
     df_input: pd.DataFrame,
@@ -471,11 +472,15 @@ def render_interactive_chart_card(
             st.rerun()
 
     with st.expander(f"图表格式微调、AI 自然语言样式助手与绘图源数据 — {chart_id}", expanded=False):
-        tab_fmt, tab_ai, tab_data = st.tabs(["手动格式调整", "AI 样式改图", "源数据表"])
+        tab_fmt, tab_ai, tab_data = st.tabs(["格式调整", "AI 样式改图", "源数据表"])
 
         with tab_fmt:
             fc1, fc2, fc3 = st.columns(3)
             with fc1:
+                st.markdown(
+                    '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">标题与配色</div>',
+                    unsafe_allow_html=True,
+                )
                 new_title = st.text_input(
                     "自定义主标题（留空使用自动结论标题）",
                     value=curr_settings.get("title") or "",
@@ -514,6 +519,15 @@ def render_interactive_chart_card(
                         for _c in _eff["categorical"][:12]
                     )
                     _src_note = _pal_src.get(new_palette, "")
+                    if not _src_note and new_palette == "主题默认":
+                        try:
+                            from chart_palettes import CHART_PALETTES as _cp_all
+
+                            _own_src = _cp_all.get(chart_id, {}).get("source", "")
+                            if _own_src:
+                                _src_note = f"本图专属色板 · {_own_src}"
+                        except Exception:
+                            pass
                     st.markdown(
                         f'<div style="margin:2px 0 2px 0;">{_swatches}</div>'
                         + (f'<div style="font-size:12px;opacity:0.75;">出处：{_src_note}</div>' if _src_note else ""),
@@ -522,6 +536,10 @@ def render_interactive_chart_card(
                 except Exception:
                     pass
             with fc2:
+                st.markdown(
+                    '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">数据呈现</div>',
+                    unsafe_allow_html=True,
+                )
                 sort_opts = ["desc", "asc", "original"]
                 sort_labels = {"desc": "按数值降序", "asc": "按数值升序", "original": "保持原始顺序"}
                 curr_sort = curr_settings.get("sort") or "desc"
@@ -545,7 +563,6 @@ def render_interactive_chart_card(
                     index=int(curr_settings.get("decimals", 1)) if int(curr_settings.get("decimals", 1)) in (0, 1, 2) else 1,
                     key=f"fmt_dec_{slot_key}",
                 )
-            with fc3:
                 new_show_lbl = st.checkbox(
                     "显示数据标签",
                     value=bool(curr_settings.get("show_labels", True)),
@@ -555,6 +572,11 @@ def render_interactive_chart_card(
                     "显示均值参考线",
                     value=bool(curr_settings.get("show_mean_line", True)),
                     key=f"fmt_mean_{slot_key}",
+                )
+            with fc3:
+                st.markdown(
+                    '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">标注与高亮</div>',
+                    unsafe_allow_html=True,
                 )
                 new_fscale = st.slider(
                     "字号缩放倍率",
@@ -569,11 +591,13 @@ def render_interactive_chart_card(
                     value=(curr_settings.get("highlight") or {}).get("target", ""),
                     key=f"fmt_hlt_{slot_key}",
                 )
-                hl_color = st.color_picker(
-                    "高亮颜色",
-                    value=(curr_settings.get("highlight") or {}).get("color", "#A50026"),
-                    key=f"fmt_hlc_{slot_key}",
-                )
+                _hc1, _hc2 = st.columns([1, 2])
+                with _hc1:
+                    hl_color = st.color_picker(
+                        "高亮颜色",
+                        value=(curr_settings.get("highlight") or {}).get("color", "#A50026"),
+                        key=f"fmt_hlc_{slot_key}",
+                    )
                 if "词云" in chart_id:
                     shape_opts = ["无", "云朵", "人形", "爱心", "星星", "咖啡杯", "圆形"]
                     curr_sh = curr_settings.get("wordcloud_shape") or "无"
