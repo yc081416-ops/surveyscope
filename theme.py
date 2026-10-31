@@ -103,7 +103,7 @@ THEMES = {
         "main_dark": "#0E2C52",
         "main_light": "#4E83B8",
         "main_pale": "#D7E5F5",
-        "accent": "#9C7A12",
+        "accent": "#7A5E0C",
         "highlight": "#9E1B32",
         "categorical": [
             "#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE",
@@ -134,7 +134,7 @@ THEMES = {
         "main_dark": "#1E2A9E",
         "main_light": "#7C8CFF",
         "main_pale": "#E1E5FF",
-        "accent": "#E4572E",
+        "accent": "#C2410C",
         "highlight": "#BE123C",
         "categorical": [
             "#14181F", "#2B3FE0", "#E03131", "#0B8754", "#E8890C", "#7048C9", "#0E7490", "#6B7280", "#C2255C",
@@ -191,11 +191,11 @@ THEMES = {
         "muted_text": "#3C5A51",
         "grid": "#BFE0D2",
         "insignificant": "#8FA9A0",
-        "main": "#0A7C6F",
+        "main": "#08685A",
         "main_dark": "#065A50",
         "main_light": "#3FB3A1",
         "main_pale": "#CDEEE3",
-        "accent": "#D2492B",
+        "accent": "#B2331F",
         "highlight": "#B81D33",
         "categorical": [
             "#0077BB", "#33BBEE", "#009988", "#EE7733", "#CC3311",

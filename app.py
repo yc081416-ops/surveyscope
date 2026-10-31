@@ -475,22 +475,14 @@ def render_interactive_chart_card(
         tab_fmt, tab_ai, tab_data = st.tabs(["格式调整", "AI 样式改图", "源数据表"])
 
         with tab_fmt:
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                st.markdown(
-                    '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">标题与配色</div>',
-                    unsafe_allow_html=True,
-                )
-                new_title = st.text_input(
-                    "自定义主标题（留空使用自动结论标题）",
-                    value=curr_settings.get("title") or "",
-                    key=f"fmt_title_{slot_key}",
-                )
-                new_sub = st.text_input(
-                    "自定义副标题",
-                    value=curr_settings.get("subtitle") or "",
-                    key=f"fmt_sub_{slot_key}",
-                )
+            # 配色选择独立成行（表单外）：切换即刷新色卡预览；其余字段进表单批量提交，
+            # 避免每改一个控件就整卡重跑一次造成的卡顿。
+            st.markdown(
+                '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">配色</div>',
+                unsafe_allow_html=True,
+            )
+            pc1, pc2 = st.columns([1, 2])
+            with pc1:
                 try:
                     from chart_palettes import COLOR_SCHEME_OPTIONS as _pal_opts_all
 
@@ -504,6 +496,7 @@ def render_interactive_chart_card(
                     index=pal_opts.index(curr_pal) if curr_pal in pal_opts else 0,
                     key=f"fmt_pal_{slot_key}",
                 )
+            with pc2:
                 # 色卡预览：先看色再选，不用记配色名
                 try:
                     from theme import resolve_effective_theme as _ret2
@@ -529,90 +522,106 @@ def render_interactive_chart_card(
                         except Exception:
                             pass
                     st.markdown(
-                        f'<div style="margin:2px 0 2px 0;">{_swatches}</div>'
+                        f'<div style="margin:32px 0 2px 0;">{_swatches}</div>'
                         + (f'<div style="font-size:12px;opacity:0.75;">出处：{_src_note}</div>' if _src_note else ""),
                         unsafe_allow_html=True,
                     )
                 except Exception:
                     pass
-            with fc2:
-                st.markdown(
-                    '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">数据呈现</div>',
-                    unsafe_allow_html=True,
-                )
-                sort_opts = ["desc", "asc", "original"]
-                sort_labels = {"desc": "按数值降序", "asc": "按数值升序", "original": "保持原始顺序"}
-                curr_sort = curr_settings.get("sort") or "desc"
-                new_sort = st.selectbox(
-                    "类别排序方式",
-                    sort_opts,
-                    index=sort_opts.index(curr_sort) if curr_sort in sort_opts else 0,
-                    format_func=lambda k: sort_labels.get(k, k),
-                    key=f"fmt_sort_{slot_key}",
-                )
-                new_topn = st.number_input(
-                    "仅显示前 N 项 (0 表示全部)",
-                    min_value=0,
-                    max_value=30,
-                    value=int(curr_settings.get("top_n") or 0),
-                    key=f"fmt_topn_{slot_key}",
-                )
-                new_decimals = st.selectbox(
-                    "数据标签小数位",
-                    [0, 1, 2],
-                    index=int(curr_settings.get("decimals", 1)) if int(curr_settings.get("decimals", 1)) in (0, 1, 2) else 1,
-                    key=f"fmt_dec_{slot_key}",
-                )
-                new_show_lbl = st.checkbox(
-                    "显示数据标签",
-                    value=bool(curr_settings.get("show_labels", True)),
-                    key=f"fmt_lbl_{slot_key}",
-                )
-                new_show_mean = st.checkbox(
-                    "显示均值参考线",
-                    value=bool(curr_settings.get("show_mean_line", True)),
-                    key=f"fmt_mean_{slot_key}",
-                )
-            with fc3:
-                st.markdown(
-                    '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">标注与高亮</div>',
-                    unsafe_allow_html=True,
-                )
-                new_fscale = st.slider(
-                    "字号缩放倍率",
-                    0.80,
-                    1.30,
-                    float(curr_settings.get("font_scale", 1.0)),
-                    0.05,
-                    key=f"fmt_fs_{slot_key}",
-                )
-                hl_target = st.text_input(
-                    "指定高亮类别名称",
-                    value=(curr_settings.get("highlight") or {}).get("target", ""),
-                    key=f"fmt_hlt_{slot_key}",
-                )
-                _hc1, _hc2 = st.columns([1, 2])
-                with _hc1:
-                    hl_color = st.color_picker(
-                        "高亮颜色",
-                        value=(curr_settings.get("highlight") or {}).get("color", "#A50026"),
-                        key=f"fmt_hlc_{slot_key}",
-                    )
-                if "词云" in chart_id:
-                    shape_opts = ["无", "云朵", "人形", "爱心", "星星", "咖啡杯", "圆形"]
-                    curr_sh = curr_settings.get("wordcloud_shape") or "无"
-                    new_wc_shape = st.selectbox(
-                        "词云轮廓形状",
-                        shape_opts,
-                        index=shape_opts.index(curr_sh) if curr_sh in shape_opts else 0,
-                        key=f"fmt_shape_{slot_key}",
-                    )
-                else:
-                    new_wc_shape = curr_settings.get("wordcloud_shape") or "无"
 
-            b_apply, b_reset = st.columns(2)
-            with b_apply:
-                if st.button("应用样式设置", type="primary", key=f"btn_apply_{slot_key}", use_container_width=True):
+            with st.form(key=f"fmt_form_{slot_key}", border=False):
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    st.markdown(
+                        '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">标题</div>',
+                        unsafe_allow_html=True,
+                    )
+                    new_title = st.text_input(
+                        "自定义主标题（留空使用自动结论标题）",
+                        value=curr_settings.get("title") or "",
+                        key=f"fmt_title_{slot_key}",
+                    )
+                    new_sub = st.text_input(
+                        "自定义副标题",
+                        value=curr_settings.get("subtitle") or "",
+                        key=f"fmt_sub_{slot_key}",
+                    )
+                with fc2:
+                    st.markdown(
+                        '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">数据呈现</div>',
+                        unsafe_allow_html=True,
+                    )
+                    sort_opts = ["desc", "asc", "original"]
+                    sort_labels = {"desc": "按数值降序", "asc": "按数值升序", "original": "保持原始顺序"}
+                    curr_sort = curr_settings.get("sort") or "desc"
+                    new_sort = st.selectbox(
+                        "类别排序方式",
+                        sort_opts,
+                        index=sort_opts.index(curr_sort) if curr_sort in sort_opts else 0,
+                        format_func=lambda k: sort_labels.get(k, k),
+                        key=f"fmt_sort_{slot_key}",
+                    )
+                    new_topn = st.number_input(
+                        "仅显示前 N 项 (0 表示全部)",
+                        min_value=0,
+                        max_value=30,
+                        value=int(curr_settings.get("top_n") or 0),
+                        key=f"fmt_topn_{slot_key}",
+                    )
+                    new_decimals = st.selectbox(
+                        "数据标签小数位",
+                        [0, 1, 2],
+                        index=int(curr_settings.get("decimals", 1)) if int(curr_settings.get("decimals", 1)) in (0, 1, 2) else 1,
+                        key=f"fmt_dec_{slot_key}",
+                    )
+                    new_show_lbl = st.checkbox(
+                        "显示数据标签",
+                        value=bool(curr_settings.get("show_labels", True)),
+                        key=f"fmt_lbl_{slot_key}",
+                    )
+                    new_show_mean = st.checkbox(
+                        "显示均值参考线",
+                        value=bool(curr_settings.get("show_mean_line", True)),
+                        key=f"fmt_mean_{slot_key}",
+                    )
+                with fc3:
+                    st.markdown(
+                        '<div style="font-size:13px;font-weight:700;color:var(--ss-ink);margin:2px 0 6px 0;">标注与高亮</div>',
+                        unsafe_allow_html=True,
+                    )
+                    new_fscale = st.slider(
+                        "字号缩放倍率",
+                        0.80,
+                        1.30,
+                        float(curr_settings.get("font_scale", 1.0)),
+                        0.05,
+                        key=f"fmt_fs_{slot_key}",
+                    )
+                    hl_target = st.text_input(
+                        "指定高亮类别名称",
+                        value=(curr_settings.get("highlight") or {}).get("target", ""),
+                        key=f"fmt_hlt_{slot_key}",
+                    )
+                    _hc1, _hc2 = st.columns([1, 2])
+                    with _hc1:
+                        hl_color = st.color_picker(
+                            "高亮颜色",
+                            value=(curr_settings.get("highlight") or {}).get("color", "#A50026"),
+                            key=f"fmt_hlc_{slot_key}",
+                        )
+                    if "词云" in chart_id:
+                        shape_opts = ["无", "云朵", "人形", "爱心", "星星", "咖啡杯", "圆形"]
+                        curr_sh = curr_settings.get("wordcloud_shape") or "无"
+                        new_wc_shape = st.selectbox(
+                            "词云轮廓形状",
+                            shape_opts,
+                            index=shape_opts.index(curr_sh) if curr_sh in shape_opts else 0,
+                            key=f"fmt_shape_{slot_key}",
+                        )
+                    else:
+                        new_wc_shape = curr_settings.get("wordcloud_shape") or "无"
+
+                if st.form_submit_button("应用样式设置", type="primary", use_container_width=True):
                     push_settings_history(st.session_state["chart_history"], slot_key, curr_settings)
                     updated = dict(curr_settings)
                     updated.update({
@@ -630,10 +639,10 @@ def render_interactive_chart_card(
                     })
                     st.session_state["chart_settings"][slot_key] = updated
                     st.rerun()
-            with b_reset:
-                if st.button("恢复默认样式", key=f"btn_reset_{slot_key}", use_container_width=True):
-                    st.session_state["chart_settings"][slot_key] = reset_settings_to_default()
-                    st.rerun()
+
+            if st.button("恢复默认样式", key=f"btn_reset_{slot_key}", use_container_width=True):
+                st.session_state["chart_settings"][slot_key] = reset_settings_to_default()
+                st.rerun()
 
         with tab_ai:
             st.caption(
