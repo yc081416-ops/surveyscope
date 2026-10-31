@@ -100,6 +100,16 @@ def get_default_chart_settings(chart_type: str = "棒棒糖图") -> dict:
     }
 
 
+def _color_scheme_options() -> list:
+    """color_scheme 全部合法取值（与 chart_palettes 注册表单一事实源，导入失败时回退基础 4 项）。"""
+    try:
+        from chart_palettes import COLOR_SCHEME_OPTIONS
+
+        return list(COLOR_SCHEME_OPTIONS)
+    except Exception:
+        return ["主题默认", "Tol Muted", "松绿序渐", "BrBG发散"]
+
+
 def build_ai_edit_prompt(
     chart_type: str,
     categories: list,
@@ -111,6 +121,7 @@ def build_ai_edit_prompt(
     附完整 JSON Schema 与 3 个标准示例。
     """
     safe_cats = [str(c) for c in (categories or [])[:50]]
+    _scheme_enum = " | ".join(f'"{n}"' for n in _color_scheme_options())
     prompt = f"""你是一个专业的统计图表样式编辑助手。请将用户的自然语言改图指令解析为结构化 JSON。
 严禁输出除 JSON 以外的任何解释文字或 Markdown 代码块标记。
 
@@ -125,7 +136,7 @@ def build_ai_edit_prompt(
 3. set_footnote: {{"action": "set_footnote", "value": "新脚注（口径注）文本"}}
 4. highlight: {{"action": "highlight", "target": "某类别名称"}} (将该类别设为高亮深红 #A50026)
 5. set_item_color: {{"action": "set_item_color", "target": "某类别名称", "value": "#RRGGBB"}} (把指定类别改成指定颜色；用户说颜色名时填对应十六进制：绿色 #2E6B57 / 红色 #A50026 / 蓝色 #88CCEE / 紫色 #AA4499 / 橙色 #C4664A)
-6. color_scheme: {{"action": "color_scheme", "value": "Tol Muted" | "松绿序渐" | "BrBG发散" | "主题默认"}}
+6. color_scheme: {{"action": "color_scheme", "value": {_scheme_enum}}}（期刊色、色盲友好与艺术家命名色板；用户说"高级/换个配色"而未指定时默认选 "Tol Muted"，说出具体名字如北斋/莫奈/NPG 时选对应方案）
 7. custom_main_color: {{"action": "custom_main_color", "value": "#RRGGBB"}}
 8. toggle_labels: {{"action": "toggle_labels", "value": true | false}}
 9. toggle_legend: {{"action": "toggle_legend", "value": true | false}}
@@ -278,7 +289,7 @@ def validate_and_apply_edits(
 
         elif act == "color_scheme":
             val = str(item.get("value", "主题默认"))
-            if val not in {"主题默认", "Tol Muted", "松绿序渐", "BrBG发散"}:
+            if val not in set(_color_scheme_options()):
                 return {"ok": False, "settings": copy.deepcopy(current_settings), "receipt": "", "error": f"友好报错：不支持的色板方案「{val}」。"}
             new_settings["color_scheme"] = val
             receipts.append(f"切换色板为「{val}」")
@@ -577,6 +588,12 @@ def _local_rule_fallback(user_instruction: str) -> str:
         return json.dumps({"action": "top_n", "value": int(m_top.group(1))}, ensure_ascii=False)
     # 整体配色/色板切换（放在最后：更具体的单类改色规则已在上方优先处理）
     if "配色" in txt or "色板" in txt:
+        for _kw, _scheme in [("北斋", "北斋海色"), ("梵高", "梵高绿野"), ("希腊", "希腊陶土"),
+                             ("卡萨特", "卡萨特茶色"), ("莫奈", "莫奈睡莲"), ("雷诺阿", "雷诺阿舞会"),
+                             ("色盲", "Okabe-Ito 色盲友好"), ("柳叶刀", "柳叶刀 Lancet"),
+                             ("NPG", "NPG 自然"), ("AAAS", "AAAS 期刊"), ("Bright", "Tol Bright")]:
+            if _kw in txt:
+                return json.dumps({"action": "color_scheme", "value": _scheme}, ensure_ascii=False)
         if "绿" in txt:
             return json.dumps({"action": "color_scheme", "value": "松绿序渐"}, ensure_ascii=False)
         if "发散" in txt:

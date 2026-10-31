@@ -340,6 +340,15 @@ def resolve_effective_theme(theme_name: str = None, settings: dict = None) -> di
             "#332288", "#117733", "#44AA99", "#88CCEE", "#DDCC77",
             "#CC6677", "#AA4499", "#882255", "#999999",
         ]
+    elif scheme:
+        # 命名配色注册表（期刊色 / 色盲友好 / MetBrewer 艺术系列），AI 与手动面板共用
+        try:
+            from chart_palettes import NAMED_COLOR_SCHEMES
+
+            if scheme in NAMED_COLOR_SCHEMES:
+                t["categorical"] = list(NAMED_COLOR_SCHEMES[scheme])
+        except Exception:
+            pass
 
     custom_main = settings.get("custom_main_color")
     if custom_main and isinstance(custom_main, str) and custom_main.startswith("#") and len(custom_main) == 7:

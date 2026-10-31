@@ -262,3 +262,29 @@ def get_chart_palette_override(chart_id: str, theme_name: str = None):
     out["accent_primary"] = out["main"]
     out["accent_secondary"] = out["accent"]
     return out
+
+
+# =============================================================================
+# 命名配色方案注册表（AI 改图 color_scheme 与格式面板「单图配色覆盖」共用）
+# - 期刊/色盲友好色值逐一核对自公开来源（2026-10-31）：
+#   ggsci（GitHub: nanxstats/ggsci, R/palettes.R）的 NPG / AAAS / Lancet；
+#   Okabe-Ito（GitHub: clauswilke/colorblindr, R/palettes.R，黑版配色）；
+#   Tol Bright（Paul Tol 官方配色页 Bright 定性方案，默认色序）。
+# - 艺术系列直接引用上方 CHART_PALETTES 的逐图色板（MetBrewer），不重复维护色值。
+# =============================================================================
+NAMED_COLOR_SCHEMES = {
+    "NPG 自然": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85"],
+    "AAAS 期刊": ["#3B4992", "#EE0000", "#008B45", "#631879", "#008280", "#BB0021", "#5F559B", "#A20056", "#808180", "#1B1919"],
+    "柳叶刀 Lancet": ["#00468B", "#ED0000", "#42B540", "#0099B4", "#925E9F", "#FDAF91", "#AD002A", "#ADB6B6", "#1B1919"],
+    "Okabe-Ito 色盲友好": ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"],
+    "Tol Bright": ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB"],
+    "北斋海色": list(CHART_PALETTES["01-棒棒糖图"]["categorical"]),
+    "梵高绿野": list(CHART_PALETTES["02-水平条形图"]["categorical"]),
+    "希腊陶土": list(CHART_PALETTES["03-帕累托图"]["categorical"]),
+    "卡萨特茶色": list(CHART_PALETTES["05-甜甜圈图"]["categorical"]),
+    "莫奈睡莲": list(CHART_PALETTES["06-多选题条形图"]["categorical"]),
+    "雷诺阿舞会": list(CHART_PALETTES["14-人口学金字塔"]["categorical"]),
+}
+
+# color_scheme 全部可选项（主题默认 + 主题层既有 3 方案 + 命名注册表），AI 与手动面板共用
+COLOR_SCHEME_OPTIONS = ["主题默认", "Tol Muted", "松绿序渐", "BrBG发散"] + list(NAMED_COLOR_SCHEMES.keys())

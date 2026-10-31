@@ -486,7 +486,12 @@ def render_interactive_chart_card(
                     value=curr_settings.get("subtitle") or "",
                     key=f"fmt_sub_{slot_key}",
                 )
-                pal_opts = ["主题默认", "松绿序渐", "BrBG发散", "Tol Muted"]
+                try:
+                    from chart_palettes import COLOR_SCHEME_OPTIONS as _pal_opts_all
+
+                    pal_opts = list(_pal_opts_all)
+                except Exception:
+                    pal_opts = ["主题默认", "松绿序渐", "BrBG发散", "Tol Muted"]
                 curr_pal = curr_settings.get("color_scheme") or "主题默认"
                 new_palette = st.selectbox(
                     "单图配色覆盖",
